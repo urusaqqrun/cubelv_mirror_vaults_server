@@ -239,19 +239,66 @@ func buildPathResolver(folders []*model.Folder) *mirror.PathResolver {
 }
 
 func toFolderMeta(f *model.Folder) mirror.FolderMeta {
-	return mirror.FolderMeta{
-		ID:         f.ID,
-		MemberID:   f.MemberID,
-		FolderName: f.FolderName,
-		Type:       f.Type,
-		ParentID:   f.ParentID,
-		OrderAt:    f.OrderAt,
-		Icon:       f.Icon,
-		CreatedAt:  f.CreatedAt,
-		UpdatedAt:  f.UpdatedAt,
-		USN:        f.Usn,
-		NoteNum:    f.NoteNum,
+	meta := mirror.FolderMeta{
+		ID:                  f.ID,
+		MemberID:            f.MemberID,
+		FolderName:          f.FolderName,
+		Type:                f.Type,
+		ParentID:            f.ParentID,
+		OrderAt:             f.OrderAt,
+		Icon:                f.Icon,
+		CreatedAt:           f.CreatedAt,
+		UpdatedAt:           f.UpdatedAt,
+		USN:                 f.Usn,
+		NoteNum:             f.NoteNum,
+		IsTemp:              f.IsTemp,
+		FolderSummary:       f.FolderSummary,
+		AiFolderName:        f.AiFolderName,
+		AiFolderSummary:     f.AiFolderSummary,
+		AiInstruction:       f.AiInstruction,
+		AutoUpdateSummary:   f.AutoUpdateSummary,
+		IsSummarizedNoteIds: f.IsSummarizedNoteIds,
+		TemplateHTML:        f.TemplateHTML,
+		TemplateCSS:         f.TemplateCSS,
+		UIPrompt:            f.UIPrompt,
+		IsShared:            f.IsShared,
+		Searchable:          f.Searchable,
+		AllowContribute:     f.AllowContribute,
+		ChartKind:           f.ChartKind,
 	}
+	for _, idx := range f.Indexes {
+		if idx == nil {
+			continue
+		}
+		meta.Indexes = append(meta.Indexes, mirror.IndexMeta{
+			Name: idx.Name, Notes: idx.Notes, IsReserved: idx.IsReserved,
+		})
+	}
+	for _, fd := range f.Fields {
+		if fd == nil {
+			continue
+		}
+		meta.Fields = append(meta.Fields, mirror.CardFieldMeta{
+			Name: fd.Name, Type: fd.Type, Options: fd.Options,
+		})
+	}
+	for _, th := range f.TemplateHistory {
+		if th == nil {
+			continue
+		}
+		meta.TemplateHistory = append(meta.TemplateHistory, mirror.TemplateHistoryMeta{
+			HTML: th.HTML, CSS: th.CSS, Timestamp: th.Timestamp,
+		})
+	}
+	for _, s := range f.Sharers {
+		if s == nil {
+			continue
+		}
+		meta.Sharers = append(meta.Sharers, mirror.SharerMeta{
+			MemberID: s.MemberID, Role: s.Role,
+		})
+	}
+	return meta
 }
 
 func toNoteMeta(n *model.Note) mirror.NoteMeta {
@@ -261,16 +308,30 @@ func toNoteMeta(n *model.Note) mirror.NoteMeta {
 	} else {
 		parent = n.FolderID
 	}
-	title := n.GetTitle()
-	return mirror.NoteMeta{
+	meta := mirror.NoteMeta{
 		ID:        n.ID,
 		ParentID:  parent,
-		Title:     title,
+		FolderID:  n.FolderID,
+		Title:     n.GetTitle(),
+		Type:      n.Type,
 		USN:       n.Usn,
 		Tags:      n.Tags,
 		CreatedAt: fmt.Sprintf("%d", n.CreateAt),
 		UpdatedAt: fmt.Sprintf("%d", n.UpdateAt),
+		IsNew:     n.IsNew,
+		AiTags:    n.AiTags,
+		ImgURLs:   n.ImgURLs,
 	}
+	if n.OrderAt != nil {
+		meta.OrderAt = *n.OrderAt
+	}
+	if n.Status != nil {
+		meta.Status = *n.Status
+	}
+	if n.AiTitle != nil {
+		meta.AiTitle = *n.AiTitle
+	}
+	return meta
 }
 
 func toCardMeta(c *model.Card) mirror.CardMeta {

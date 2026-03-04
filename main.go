@@ -61,13 +61,31 @@ func main() {
 	// Vault Lock
 	vaultLock := executor.NewVaultLock()
 
-	// Task executor（整合 Claude CLI + VaultFS + Vault Lock）
+	// Task executor（整合 Claude CLI + VaultFS + Vault Lock + MongoDB 回寫 + 衝突判定 + USN 遞增）
+	var dataWriter executor.DataWriter
+	var docUSNReader executor.USNReader
+	var usnInc executor.USNIncrementer
+	var latUSN latestUSNReader
+	var fullExp vaultsync.FullExporter
+	if mongoReader != nil {
+		mongoReader.SetRedis(rdb)
+		dataWriter = mongoReader
+		docUSNReader = mongoReader
+		usnInc = mongoReader
+		latUSN = mongoReader
+		fullExp = mongoReader
+	}
 	taskExec := &fullTaskExecutor{
-		claudeExec: claudeExec,
-		vaultLock:  vaultLock,
-		vaultFS:    vaultFS,
-		vaultRoot:  cfg.VaultRoot,
-		ctx:        ctx,
+		claudeExec:   claudeExec,
+		vaultLock:    vaultLock,
+		vaultFS:      vaultFS,
+		vaultRoot:    cfg.VaultRoot,
+		writer:       dataWriter,
+		usnReader:    docUSNReader,
+		usnInc:       usnInc,
+		latestUSN:    latUSN,
+		fullExporter: fullExp,
+		ctx:          ctx,
 	}
 	taskStore := selectTaskStore(api.NewMemoryTaskStore(), rdb)
 
@@ -172,13 +190,23 @@ func initRedis(uri string) *redis.Client {
 	return rdb
 }
 
+// latestUSNReader 查詢用戶最大 USN（衝突判定起始基準）
+type latestUSNReader interface {
+	GetLatestUSN(ctx context.Context, userID string) (int, error)
+}
+
 // fullTaskExecutor 整合所有執行元件
 type fullTaskExecutor struct {
-	claudeExec *executor.ClaudeExecutor
-	vaultLock  *executor.VaultLock
-	vaultFS    mirror.VaultFS
-	vaultRoot  string
-	ctx        context.Context
+	claudeExec   *executor.ClaudeExecutor
+	vaultLock    *executor.VaultLock
+	vaultFS      mirror.VaultFS
+	vaultRoot    string
+	writer       executor.DataWriter
+	usnReader    executor.USNReader
+	usnInc       executor.USNIncrementer
+	latestUSN    latestUSNReader
+	fullExporter vaultsync.FullExporter
+	ctx          context.Context
 }
 
 func (e *fullTaskExecutor) Execute(task *api.Task) error {
@@ -195,11 +223,73 @@ func (e *fullTaskExecutor) Execute(task *api.Task) error {
 	if execCtx == nil {
 		execCtx = context.Background()
 	}
+
+	// 確保 Vault 已初始化（CLAUDE.md 不存在時做全量匯出）
+	if e.fullExporter != nil && !e.vaultFS.Exists(task.UserID+"/CLAUDE.md") {
+		if err := vaultsync.ExportFullVault(execCtx, e.vaultFS, e.fullExporter, task.UserID); err != nil {
+			log.Printf("[Task %s] full export error: %v", task.ID, err)
+		}
+	}
+
+	// 1. 記錄 AI 開始前的最大 USN（衝突判定用）
+	aiStartUSN := 0
+	if e.latestUSN != nil {
+		if usn, usnErr := e.latestUSN.GetLatestUSN(execCtx, task.UserID); usnErr == nil {
+			aiStartUSN = usn
+		}
+	}
+
+	// 2. 執行前快照 + path→ID 映射（刪除回寫用）
+	beforeSnap, snapErr := executor.TakeSnapshot(e.vaultFS, task.UserID)
+	if snapErr != nil {
+		log.Printf("[Task %s] snapshot before error: %v", task.ID, snapErr)
+		beforeSnap = make(map[string]executor.FileSnapshot)
+	}
+	beforeIDMap := executor.BuildPathIDMap(e.vaultFS, task.UserID)
+
+	// 3. 執行 Claude CLI
 	output, err := e.claudeExec.ExecuteTask(execCtx, task.ID, workDir, task.Instruction)
 	if err != nil {
 		return err
 	}
 	task.Result = output
+
+	// 4. 執行後快照 + diff
+	afterSnap, snapErr := executor.TakeSnapshot(e.vaultFS, task.UserID)
+	if snapErr != nil {
+		log.Printf("[Task %s] snapshot after error: %v", task.ID, snapErr)
+		return nil
+	}
+
+	diff := executor.ComputeDiff(beforeSnap, afterSnap)
+	hasChanges := len(diff.Created) > 0 || len(diff.Modified) > 0 || len(diff.Deleted) > 0 || len(diff.Moved) > 0
+	if !hasChanges {
+		log.Printf("[Task %s] no vault changes detected", task.ID)
+		return nil
+	}
+
+	log.Printf("[Task %s] diff: +%d ~%d -%d mv%d",
+		task.ID, len(diff.Created), len(diff.Modified), len(diff.Deleted), len(diff.Moved))
+
+	// 5. 解析變更
+	importer := mirror.NewImporter(e.vaultFS)
+	movedEntries := make([]mirror.MovedFileEntry, len(diff.Moved))
+	for i, m := range diff.Moved {
+		movedEntries[i] = mirror.MovedFileEntry{OldPath: m.OldPath, NewPath: m.NewPath}
+	}
+	entries, parseErr := importer.ProcessDiff(task.UserID, diff.Created, diff.Modified, diff.Deleted, movedEntries, beforeIDMap)
+	if parseErr != nil {
+		log.Printf("[Task %s] parse diff error: %v", task.ID, parseErr)
+		return nil
+	}
+
+	// 6. 回寫 MongoDB（含 USN 衝突判定 + USN 遞增 + Deletion Log）
+	if e.writer != nil && len(entries) > 0 {
+		result := executor.WriteBack(execCtx, e.writer, e.usnReader, e.usnInc, task.UserID, entries, aiStartUSN)
+		log.Printf("[Task %s] writeback: created=%d updated=%d moved=%d deleted=%d skipped=%d errors=%d",
+			task.ID, result.Created, result.Updated, result.Moved, result.Deleted, result.Skipped, result.Errors)
+	}
+
 	return nil
 }
 

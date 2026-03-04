@@ -8,42 +8,90 @@ import (
 	"strings"
 
 	htmltomd "github.com/JohannesKaufmann/html-to-markdown/v2"
+	"github.com/yuin/goldmark"
 	"gopkg.in/yaml.v3"
 )
 
-// NoteMeta frontmatter 元資料
+// NoteMeta frontmatter 元資料（完整映射 model.Note 所有欄位）
 type NoteMeta struct {
 	ID        string   `yaml:"id" json:"id"`
 	ParentID  string   `yaml:"parentID" json:"parentID"`
+	FolderID  string   `yaml:"folderID,omitempty" json:"folderID,omitempty"`
 	Title     string   `yaml:"title" json:"title"`
+	Type      string   `yaml:"type,omitempty" json:"type,omitempty"`
 	USN       int      `yaml:"usn" json:"usn"`
 	Tags      []string `yaml:"tags,omitempty" json:"tags,omitempty"`
+	OrderAt   string   `yaml:"orderAt,omitempty" json:"orderAt,omitempty"`
+	Status    string   `yaml:"status,omitempty" json:"status,omitempty"`
+	AiTitle   string   `yaml:"aiTitle,omitempty" json:"aiTitle,omitempty"`
+	AiTags    []string `yaml:"aiTags,omitempty" json:"aiTags,omitempty"`
+	ImgURLs   []string `yaml:"imgURLs,omitempty" json:"imgURLs,omitempty"`
+	IsNew     bool     `yaml:"isNew,omitempty" json:"isNew,omitempty"`
 	CreatedAt string   `yaml:"createdAt" json:"createdAt"`
 	UpdatedAt string   `yaml:"updatedAt" json:"updatedAt"`
 	HTMLHash  string   `yaml:"htmlHash" json:"htmlHash"`
 }
 
-// FolderMeta _folder.json 元資料
+// FolderMeta _folder.json 元資料（完整映射 model.Folder 所有欄位）
 type FolderMeta struct {
-	ID         string           `json:"ID"`
-	MemberID   string           `json:"memberID"`
-	FolderName string           `json:"folderName"`
-	Type       *string          `json:"type,omitempty"`
-	ParentID   *string          `json:"parentID,omitempty"`
-	OrderAt    *string          `json:"orderAt,omitempty"`
-	Icon       *string          `json:"icon,omitempty"`
-	CreatedAt  string           `json:"createdAt,omitempty"`
-	UpdatedAt  string           `json:"updatedAt,omitempty"`
-	USN        int              `json:"usn,omitempty"`
-	NoteNum    int64            `json:"noteNum,omitempty"`
-	Fields     []CardFieldMeta  `json:"fields,omitempty"`
-	ChartKind  *string          `json:"chartKind,omitempty"`
+	ID         string  `json:"ID"`
+	MemberID   string  `json:"memberID"`
+	FolderName string  `json:"folderName"`
+	Type       *string `json:"type,omitempty"`
+	ParentID   *string `json:"parentID,omitempty"`
+	OrderAt    *string `json:"orderAt,omitempty"`
+	Icon       *string `json:"icon,omitempty"`
+	CreatedAt  string  `json:"createdAt,omitempty"`
+	UpdatedAt  string  `json:"updatedAt,omitempty"`
+	USN        int     `json:"usn,omitempty"`
+	NoteNum    int64   `json:"noteNum,omitempty"`
+	IsTemp     bool    `json:"isTemp,omitempty"`
+
+	// NOTE/TODO 專用
+	Indexes             []IndexMeta `json:"indexes,omitempty"`
+	FolderSummary       *string     `json:"folderSummary,omitempty"`
+	AiFolderName        *string     `json:"aiFolderName,omitempty"`
+	AiFolderSummary     *string     `json:"aiFolderSummary,omitempty"`
+	AiInstruction       *string     `json:"aiInstruction,omitempty"`
+	AutoUpdateSummary   bool        `json:"autoUpdateSummary,omitempty"`
+	IsSummarizedNoteIds []*string   `json:"isSummarizedNoteIds,omitempty"`
+
+	// CARD 專用
+	Fields          []CardFieldMeta          `json:"fields,omitempty"`
+	TemplateHTML    *string                  `json:"templateHtml,omitempty"`
+	TemplateCSS     *string                  `json:"templateCss,omitempty"`
+	UIPrompt        *string                  `json:"uiPrompt,omitempty"`
+	TemplateHistory []TemplateHistoryMeta    `json:"templateHistory,omitempty"`
+	IsShared        bool                     `json:"isShared,omitempty"`
+	Searchable      bool                     `json:"searchable,omitempty"`
+	AllowContribute bool                     `json:"allowContribute,omitempty"`
+	Sharers         []SharerMeta             `json:"sharers,omitempty"`
+
+	// CHART 專用
+	ChartKind *string `json:"chartKind,omitempty"`
+}
+
+type IndexMeta struct {
+	Name       string   `json:"name"`
+	Notes      []string `json:"notes,omitempty"`
+	IsReserved bool     `json:"isReserved,omitempty"`
 }
 
 type CardFieldMeta struct {
 	Name    string   `json:"name"`
 	Type    string   `json:"type"`
 	Options []string `json:"options,omitempty"`
+}
+
+type TemplateHistoryMeta struct {
+	HTML      string `json:"html"`
+	CSS       string `json:"css"`
+	Timestamp string `json:"timestamp"`
+}
+
+type SharerMeta struct {
+	MemberID string `json:"memberID"`
+	Role     string `json:"role"`
 }
 
 // CardMeta Card JSON 元資料
@@ -132,6 +180,15 @@ func JSONToCard(data []byte) (CardMeta, error) {
 	var meta CardMeta
 	err := json.Unmarshal(data, &meta)
 	return meta, err
+}
+
+// MarkdownToHTML 將 Markdown 文字轉為 HTML（用於回寫 MongoDB 的 content 欄位）
+func MarkdownToHTML(md string) (string, error) {
+	var buf bytes.Buffer
+	if err := goldmark.Convert([]byte(md), &buf); err != nil {
+		return "", fmt.Errorf("markdown to html: %w", err)
+	}
+	return buf.String(), nil
 }
 
 func computeHash(content string) string {

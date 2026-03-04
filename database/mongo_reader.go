@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -14,10 +15,16 @@ import (
 	vaultsync "github.com/urusaqqrun/vault-mirror-service/sync"
 )
 
-// MongoReader 提供同步所需的 MongoDB 讀取能力。
+// MongoReader 提供同步所需的 MongoDB 讀寫能力。
 type MongoReader struct {
 	client *mongo.Client
 	db     *mongo.Database
+	rdb    *redis.Client
+}
+
+// SetRedis 注入 Redis 用戶端（USN 遞增用）
+func (m *MongoReader) SetRedis(rdb *redis.Client) {
+	m.rdb = rdb
 }
 
 func NewMongoReader(ctx context.Context, mongoURI, dbName string) (*MongoReader, error) {
@@ -202,6 +209,35 @@ func (m *MongoReader) GetChangesAfterUSN(ctx context.Context, userID string, aft
 		allEvents = append(allEvents, r.events...)
 	}
 	return allEvents, nil
+}
+
+// GetDocUSN 查詢指定文件的當前 USN（衝突判定用）。
+// 文件不存在時回傳 -1。
+func (m *MongoReader) GetDocUSN(ctx context.Context, userID, collection, docID string) (int, error) {
+	var col *mongo.Collection
+	switch collection {
+	case "note":
+		col = m.notesCol()
+	case "card":
+		col = m.cardsCol()
+	case "chart":
+		col = m.chartsCol()
+	default:
+		col = m.foldersCol()
+	}
+	var row struct {
+		Usn int `bson:"usn"`
+	}
+	err := col.FindOne(ctx, bson.M{"_id": docID, "memberID": userID},
+		options.FindOne().SetProjection(bson.M{"usn": 1}),
+	).Decode(&row)
+	if err == mongo.ErrNoDocuments {
+		return -1, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return row.Usn, nil
 }
 
 func (m *MongoReader) ListActiveUsers(ctx context.Context) ([]string, error) {

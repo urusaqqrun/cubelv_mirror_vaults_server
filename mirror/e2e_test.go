@@ -96,7 +96,7 @@ updatedAt: "1709000000000"
 	importer := NewImporter(fs)
 	entries, err := importer.ProcessDiff("user1", nil, nil, nil, []MovedFileEntry{
 		{OldPath: "NOTE/未分類/重要筆記.md", NewPath: "NOTE/工作/重要筆記.md"},
-	})
+	}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

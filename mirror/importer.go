@@ -24,6 +24,7 @@ type ImportEntry struct {
 	Collection string // folder / note / card / chart
 	Path       string
 	OldPath    string // 搬移時的舊路徑
+	DocID      string // 刪除時從 beforeIDMap 取得
 
 	// 解析後的資料（依 Collection 填入對應欄位）
 	FolderMeta *FolderMeta
@@ -43,7 +44,8 @@ func NewImporter(fs VaultFS) *Importer {
 }
 
 // ProcessDiff 根據 VaultDiff 產生匯入動作清單
-func (imp *Importer) ProcessDiff(userId string, created, modified, deleted []string, moved []MovedFileEntry) ([]ImportEntry, error) {
+// beforeIDMap: path→docID 映射，用於解析已刪除檔案的 ID（刪除的檔案無法讀取）
+func (imp *Importer) ProcessDiff(userId string, created, modified, deleted []string, moved []MovedFileEntry, beforeIDMap map[string]string) ([]ImportEntry, error) {
 	var entries []ImportEntry
 
 	for _, path := range created {
@@ -59,12 +61,6 @@ func (imp *Importer) ProcessDiff(userId string, created, modified, deleted []str
 		if err != nil {
 			continue
 		}
-
-		// htmlHash 機制：hash 未變 → 跳過（AI 沒改內容）
-		if entry.Collection == "note" && entry.NoteMeta != nil && entry.HTMLHash != "" {
-			entry.Action = ImportActionUpdate
-		}
-
 		entries = append(entries, entry)
 	}
 
@@ -73,6 +69,11 @@ func (imp *Importer) ProcessDiff(userId string, created, modified, deleted []str
 			Action:     ImportActionDelete,
 			Collection: detectCollection(path),
 			Path:       path,
+		}
+		if beforeIDMap != nil {
+			if id, ok := beforeIDMap[path]; ok {
+				entry.DocID = id
+			}
 		}
 		entries = append(entries, entry)
 	}
