@@ -70,10 +70,6 @@
                 {
                     "name": "REDIS_URI",
                     "valueFrom": "arn:aws:ssm:ap-northeast-1:<AWS_ACCOUNT_ID>:parameter/noteceo/REDIS_URI"
-                },
-                {
-                    "name": "ANTHROPIC_API_KEY",
-                    "valueFrom": "arn:aws:ssm:ap-northeast-1:<AWS_ACCOUNT_ID>:parameter/noteceo/ANTHROPIC_API_KEY"
                 }
             ],
             "logConfiguration": {

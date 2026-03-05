@@ -15,9 +15,8 @@ ECR_REPOSITORY="mirror-service"
 ECS_CLUSTER="membercenter-cluster"
 ECS_SERVICE="mirror-service"
 
-# 網路 & 安全組配置（與 golang_service 共用同一 VPC）
-PRIVATE_SUBNET_1="subnet-003cc6dce26526d0b"
-PRIVATE_SUBNET_2="subnet-09dc8a28dd0d2348a"
+# 網路 & 安全組配置（與其他服務同 subnet）
+PRIVATE_SUBNET_1="subnet-09c5690963a9d3223"
 SECURITY_GROUP="sg-04573257fb4272561"
 
 # CloudMap 配置（首次部署時需在 AWS Console 或 CLI 建立並填入）
@@ -193,7 +192,7 @@ if [ "$SERVICE_STATUS" != "ACTIVE" ]; then
     --launch-type FARGATE \
     --platform-version "1.4.0" \
     --network-configuration \
-       "awsvpcConfiguration={subnets=[$PRIVATE_SUBNET_1,$PRIVATE_SUBNET_2],securityGroups=[$SECURITY_GROUP],assignPublicIp=DISABLED}" \
+       "awsvpcConfiguration={subnets=[$PRIVATE_SUBNET_1],securityGroups=[$SECURITY_GROUP],assignPublicIp=DISABLED}" \
     $SERVICE_REGISTRIES_ARG \
     --enable-execute-command \
     --region "$AWS_REGION"
@@ -209,7 +208,7 @@ else
     --region "$AWS_REGION" \
     $SERVICE_REGISTRIES_ARG \
     --network-configuration \
-       "awsvpcConfiguration={subnets=[$PRIVATE_SUBNET_1,$PRIVATE_SUBNET_2],securityGroups=[$SECURITY_GROUP],assignPublicIp=DISABLED}"
+       "awsvpcConfiguration={subnets=[$PRIVATE_SUBNET_1],securityGroups=[$SECURITY_GROUP],assignPublicIp=DISABLED}"
   echo "✅ 滾動更新已觸發"
 fi
 
