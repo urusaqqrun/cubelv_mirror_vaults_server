@@ -9,9 +9,9 @@ fi
 if [ -z "$REDIS_URI" ]; then
   echo "⚠️ 警告: REDIS_URI 未設置"
 else
-  # 嘗試檢查 Redis 連通性
-  REDIS_HOST=$(echo "$REDIS_URI" | sed -E 's|redis://([^:]+).*|\1|')
-  REDIS_PORT=$(echo "$REDIS_URI" | sed -E 's|.*:([0-9]+).*|\1|')
+  # 嘗試檢查 Redis 連通性（支援 redis:// 和 rediss:// 格式）
+  REDIS_HOST=$(echo "$REDIS_URI" | sed -E 's|^rediss?://||' | sed -E 's|:[0-9]+.*||')
+  REDIS_PORT=$(echo "$REDIS_URI" | sed -E 's|^rediss?://[^:]+:||' | sed -E 's|[^0-9].*||')
   if [ -n "$REDIS_HOST" ] && [ -n "$REDIS_PORT" ]; then
     timeout 10s bash -c "until nc -z $REDIS_HOST $REDIS_PORT; do echo '等待 Redis...'; sleep 2; done" || echo "⚠️ Redis 未就緒，繼續啟動..."
   fi

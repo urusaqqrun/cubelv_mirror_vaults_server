@@ -17,22 +17,32 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o vault-mirror-service ./mai
 
 # -------- Final Stage --------
 FROM debian:bullseye-slim
-WORKDIR /app
 
 RUN apt-get update && \
     apt-get install -y ca-certificates tzdata bash curl netcat-openbsd && \
     rm -rf /var/lib/apt/lists/*
 
-# 安裝 Claude CLI
-RUN curl -fsSL https://claude.ai/install.sh | sh || true
+# 建立非 root 使用者（Claude CLI 拒絕以 root + --dangerously-skip-permissions 運行）
+RUN groupadd -r mirror && useradd -r -g mirror -m -s /bin/bash mirror
 
+# 以 mirror 身份安裝 Claude CLI
+USER mirror
+RUN curl -fsSL https://claude.ai/install.sh | bash && \
+    /home/mirror/.local/bin/claude --version || echo "⚠️ Claude CLI 安裝失敗"
+ENV PATH="/home/mirror/.local/bin:${PATH}"
+
+# 回到 root 複製檔案、設定權限
+USER root
+WORKDIR /app
 COPY --from=builder /app/vault-mirror-service /app/vault-mirror-service
 COPY ./config/ /app/config/
 COPY ./entrypoint.sh /app/
-RUN chmod +x /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh && \
+    chown -R mirror:mirror /app
 
 EXPOSE 8080
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 CMD curl -f http://localhost:8080/health || exit 1
 
+USER mirror
 ENTRYPOINT ["/app/entrypoint.sh"]
