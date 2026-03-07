@@ -38,8 +38,11 @@ updatedAt: "1709000000000"
 	if entries[0].Action != ImportActionCreate {
 		t.Errorf("action: got %q, want %q", entries[0].Action, ImportActionCreate)
 	}
-	if entries[0].Collection != "note" {
-		t.Errorf("collection: got %q, want %q", entries[0].Collection, "note")
+	if entries[0].Collection != "item" {
+		t.Errorf("collection: got %q, want %q", entries[0].Collection, "item")
+	}
+	if entries[0].ItemType != "NOTE" {
+		t.Errorf("itemType: got %q, want %q", entries[0].ItemType, "NOTE")
 	}
 	if entries[0].NoteMeta == nil {
 		t.Fatal("NoteMeta should not be nil")
@@ -145,8 +148,11 @@ func TestProcessDiff_NewFolder(t *testing.T) {
 	if len(entries) != 1 {
 		t.Fatalf("got %d entries, want 1", len(entries))
 	}
-	if entries[0].Collection != "folder" {
-		t.Errorf("collection: got %q, want %q", entries[0].Collection, "folder")
+	if entries[0].Collection != "item" {
+		t.Errorf("collection: got %q, want %q", entries[0].Collection, "item")
+	}
+	if entries[0].ItemType != "FOLDER" {
+		t.Errorf("itemType: got %q, want %q", entries[0].ItemType, "FOLDER")
 	}
 	if entries[0].FolderMeta == nil {
 		t.Fatal("FolderMeta should not be nil")
@@ -169,8 +175,11 @@ func TestProcessDiff_CardCreated(t *testing.T) {
 	if len(entries) != 1 {
 		t.Fatalf("got %d entries, want 1", len(entries))
 	}
-	if entries[0].Collection != "card" {
-		t.Errorf("collection: got %q, want %q", entries[0].Collection, "card")
+	if entries[0].Collection != "item" {
+		t.Errorf("collection: got %q, want %q", entries[0].Collection, "item")
+	}
+	if entries[0].ItemType != "CARD" {
+		t.Errorf("itemType: got %q, want %q", entries[0].ItemType, "CARD")
 	}
 	if entries[0].CardMeta.Name != "鼎泰豐" {
 		t.Errorf("card name: got %q", entries[0].CardMeta.Name)
@@ -198,21 +207,31 @@ func TestProcessDiff_MixedChanges(t *testing.T) {
 	}
 }
 
-func TestDetectCollection(t *testing.T) {
+func TestDetectItemType(t *testing.T) {
 	tests := []struct {
 		path     string
 		expected string
 	}{
-		{"NOTE/工作/_folder.json", "folder"},
-		{"NOTE/工作/test.md", "note"},
-		{"CARD/美食/鼎泰豐.json", "card"},
-		{"CHART/月營收/Q4.json", "chart"},
-		{"TODO/待辦/task.md", "note"},
+		{"NOTE/工作/_folder.json", "FOLDER"},
+		{"NOTE/工作/test.md", "NOTE"},
+		{"CARD/美食/鼎泰豐.json", "CARD"},
+		{"CHART/月營收/Q4.json", "CHART"},
+		{"TODO/待辦/task.md", "TODO"},
 	}
 	for _, tt := range tests {
-		got := detectCollection(tt.path)
+		got := detectItemType(tt.path)
 		if got != tt.expected {
-			t.Errorf("detectCollection(%q): got %q, want %q", tt.path, got, tt.expected)
+			t.Errorf("detectItemType(%q): got %q, want %q", tt.path, got, tt.expected)
+		}
+	}
+}
+
+func TestDetectCollection_AlwaysReturnsItem(t *testing.T) {
+	paths := []string{"NOTE/test.md", "CARD/test.json", "_folder.json"}
+	for _, p := range paths {
+		got := detectCollection(p)
+		if got != "item" {
+			t.Errorf("detectCollection(%q): got %q, want %q", p, got, "item")
 		}
 	}
 }

@@ -6,9 +6,11 @@ import (
 	"log"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/urusaqqrun/vault-mirror-service/mirror"
 )
@@ -19,6 +21,8 @@ type DataWriter interface {
 	UpsertNote(ctx context.Context, userID string, doc bson.M) error
 	UpsertCard(ctx context.Context, userID string, doc bson.M) error
 	UpsertChart(ctx context.Context, userID string, doc bson.M) error
+	UpsertItem(ctx context.Context, userID string, doc bson.M) error
+	DeleteItemDoc(ctx context.Context, userID, docID string, usn int) error
 	DeleteDocument(ctx context.Context, userID, collection, docID string, usn int) error
 }
 
@@ -42,75 +46,91 @@ type WriteBackResult struct {
 	Errors   int
 }
 
-// WriteBack 將 ImportEntry 清單寫回 MongoDB，並透過 USN 衝突判定決定是否套用。
+// WriteBack 將 ImportEntry 清單寫回 MongoDB，使用 errgroup 並行處理（上限 8）。
 // usnReader 為 nil 時跳過衝突判定（全部套用）。
 // usnInc 為 nil 時不遞增 USN（保留原始值）。
 func WriteBack(ctx context.Context, writer DataWriter, usnReader USNReader, usnInc USNIncrementer, userID string, entries []mirror.ImportEntry, aiStartUSN int) WriteBackResult {
-	var result WriteBackResult
-	for _, e := range entries {
-		if ctx.Err() != nil {
-			break
-		}
+	var created, updated, moved, deleted, skipped, errors int64
 
-		// 衝突判定：查詢 DB 當前 USN，若用戶在 AI 執行期間修改了該文件則跳過回寫。
-		// 判定規則：dbUSN > aiStartUSN 表示用戶在 AI 執行期間更新了此文件，跳過以保留用戶修改。
-		// Create 永遠套用（新檔案不存在衝突）。
-		if usnReader != nil && e.Action != mirror.ImportActionCreate {
-			docID := resolveDocID(e)
-			if docID != "" {
-				dbUSN, usnErr := usnReader.GetDocUSN(ctx, userID, e.Collection, docID)
-				if usnErr != nil {
-					log.Printf("[WriteBack] GetDocUSN error (%s/%s): %v", e.Collection, docID, usnErr)
-				} else if dbUSN > aiStartUSN {
-					log.Printf("[WriteBack] conflict skip %s %s: user modified during AI task (dbUSN=%d > aiStartUSN=%d)",
-						e.Action, e.Path, dbUSN, aiStartUSN)
-					result.Skipped++
-					continue
+	g, gCtx := errgroup.WithContext(ctx)
+	g.SetLimit(8)
+
+	for _, e := range entries {
+		e := e
+		g.Go(func() error {
+			if gCtx.Err() != nil {
+				return nil
+			}
+
+			// 衝突判定
+			if usnReader != nil && e.Action != mirror.ImportActionCreate {
+				docID := resolveDocID(e)
+				if docID != "" {
+					dbUSN, usnErr := usnReader.GetDocUSN(gCtx, userID, e.Collection, docID)
+					if usnErr != nil {
+						log.Printf("[WriteBack] GetDocUSN error (%s/%s): %v", e.Collection, docID, usnErr)
+					} else if dbUSN > aiStartUSN {
+						log.Printf("[WriteBack] conflict skip %s %s: user modified during AI task (dbUSN=%d > aiStartUSN=%d)",
+							e.Action, e.Path, dbUSN, aiStartUSN)
+						atomic.AddInt64(&skipped, 1)
+						return nil
+					}
 				}
 			}
-		}
 
-		// 遞增 USN：每個寫入操作取得新 USN，確保客戶端能透過 USN polling 偵測到 AI 修改
-		newUSN := 0
-		if usnInc != nil {
-			usn, usnErr := usnInc.IncrementUSN(ctx, userID)
-			if usnErr != nil {
-				log.Printf("[WriteBack] IncrementUSN error: %v", usnErr)
-				result.Errors++
-				continue
+			// USN 遞增（Redis INCR 本身是原子操作，可安全並行呼叫）
+			newUSN := 0
+			if usnInc != nil {
+				usn, usnErr := usnInc.IncrementUSN(gCtx, userID)
+				if usnErr != nil {
+					log.Printf("[WriteBack] IncrementUSN error: %v", usnErr)
+					atomic.AddInt64(&errors, 1)
+					return nil
+				}
+				newUSN = usn
 			}
-			newUSN = usn
-		}
 
-		var err error
-		switch e.Action {
-		case mirror.ImportActionCreate:
-			err = upsertEntry(ctx, writer, userID, e, newUSN)
-			if err == nil {
-				result.Created++
+			var err error
+			switch e.Action {
+			case mirror.ImportActionCreate:
+				err = upsertEntry(gCtx, writer, userID, e, newUSN)
+				if err == nil {
+					atomic.AddInt64(&created, 1)
+				}
+			case mirror.ImportActionUpdate:
+				err = upsertEntry(gCtx, writer, userID, e, newUSN)
+				if err == nil {
+					atomic.AddInt64(&updated, 1)
+				}
+			case mirror.ImportActionMove:
+				err = upsertEntry(gCtx, writer, userID, e, newUSN)
+				if err == nil {
+					atomic.AddInt64(&moved, 1)
+				}
+			case mirror.ImportActionDelete:
+				err = deleteEntry(gCtx, writer, userID, e, newUSN)
+				if err == nil {
+					atomic.AddInt64(&deleted, 1)
+				}
 			}
-		case mirror.ImportActionUpdate:
-			err = upsertEntry(ctx, writer, userID, e, newUSN)
-			if err == nil {
-				result.Updated++
+			if err != nil {
+				log.Printf("[WriteBack] %s %s error: %v", e.Action, e.Path, err)
+				atomic.AddInt64(&errors, 1)
 			}
-		case mirror.ImportActionMove:
-			err = upsertEntry(ctx, writer, userID, e, newUSN)
-			if err == nil {
-				result.Moved++
-			}
-		case mirror.ImportActionDelete:
-			err = deleteEntry(ctx, writer, userID, e, newUSN)
-			if err == nil {
-				result.Deleted++
-			}
-		}
-		if err != nil {
-			log.Printf("[WriteBack] %s %s error: %v", e.Action, e.Path, err)
-			result.Errors++
-		}
+			return nil
+		})
 	}
-	return result
+
+	g.Wait()
+
+	return WriteBackResult{
+		Created: int(created),
+		Updated: int(updated),
+		Moved:   int(moved),
+		Deleted: int(deleted),
+		Skipped: int(skipped),
+		Errors:  int(errors),
+	}
 }
 
 // resolveDocID 從 ImportEntry 取得文件 ID（用於衝突判定查詢）
@@ -119,6 +139,16 @@ func resolveDocID(e mirror.ImportEntry) string {
 		return e.DocID
 	}
 	switch e.Collection {
+	case "item":
+		if e.FolderMeta != nil {
+			return e.FolderMeta.ID
+		}
+		if e.NoteMeta != nil {
+			return e.NoteMeta.ID
+		}
+		if e.CardMeta != nil {
+			return e.CardMeta.ID
+		}
 	case "folder":
 		if e.FolderMeta != nil {
 			return e.FolderMeta.ID
@@ -137,6 +167,8 @@ func resolveDocID(e mirror.ImportEntry) string {
 
 func upsertEntry(ctx context.Context, w DataWriter, userID string, e mirror.ImportEntry, newUSN int) error {
 	switch e.Collection {
+	case "item":
+		return upsertItemEntry(ctx, w, userID, e, newUSN)
 	case "folder":
 		if e.FolderMeta == nil {
 			return fmt.Errorf("folder meta is nil")
@@ -184,10 +216,232 @@ func upsertEntry(ctx context.Context, w DataWriter, userID string, e mirror.Impo
 	}
 }
 
+// upsertItemEntry 將 meta 轉換為 Item collection 格式後 upsert
+func upsertItemEntry(ctx context.Context, w DataWriter, userID string, e mirror.ImportEntry, newUSN int) error {
+	var doc bson.M
+	switch {
+	case e.FolderMeta != nil:
+		doc = folderMetaToItemBson(e.FolderMeta, newUSN)
+	case e.NoteMeta != nil:
+		doc = noteMetaToItemBson(e.NoteMeta, e.NoteBody, newUSN)
+	case e.CardMeta != nil:
+		doc = cardMetaToItemBson(e.CardMeta, e.ItemType, newUSN)
+	default:
+		return fmt.Errorf("item entry has no meta data")
+	}
+	return w.UpsertItem(ctx, userID, doc)
+}
+
+// folderMetaToItemBson 將 FolderMeta 轉為 Item collection 的 bson.M
+func folderMetaToItemBson(m *mirror.FolderMeta, usn int) bson.M {
+	fields := bson.M{
+		"memberID": m.MemberID,
+		"name":     m.FolderName,
+		"noteNum":  m.NoteNum,
+		"isTemp":   m.IsTemp,
+	}
+	if usn > 0 {
+		fields["usn"] = usn
+	} else {
+		fields["usn"] = m.USN
+	}
+	if m.Type != nil {
+		fields["folderType"] = *m.Type
+	}
+	if m.ParentID != nil {
+		fields["parentID"] = *m.ParentID
+	}
+	if m.OrderAt != nil {
+		fields["orderAt"] = *m.OrderAt
+	}
+	if m.Icon != nil {
+		fields["icon"] = *m.Icon
+	}
+	if m.CreatedAt != "" {
+		fields["createdAt"] = parseTimestamp(m.CreatedAt)
+	}
+	if m.UpdatedAt != "" {
+		fields["updatedAt"] = parseTimestamp(m.UpdatedAt)
+	}
+	if m.FolderSummary != nil {
+		fields["folderSummary"] = *m.FolderSummary
+	}
+	if m.AiFolderName != nil {
+		fields["aiFolderName"] = *m.AiFolderName
+	}
+	if m.AiFolderSummary != nil {
+		fields["aiFolderSummary"] = *m.AiFolderSummary
+	}
+	if m.AiInstruction != nil {
+		fields["aiInstruction"] = *m.AiInstruction
+	}
+	fields["autoUpdateSummary"] = m.AutoUpdateSummary
+	if len(m.Indexes) > 0 {
+		fields["indexes"] = m.Indexes
+	}
+	if len(m.IsSummarizedNoteIds) > 0 {
+		fields["isSummarizedNoteIds"] = m.IsSummarizedNoteIds
+	}
+	if m.TemplateHTML != nil {
+		fields["templateHtml"] = *m.TemplateHTML
+	}
+	if m.TemplateCSS != nil {
+		fields["templateCss"] = *m.TemplateCSS
+	}
+	if m.UIPrompt != nil {
+		fields["uiPrompt"] = *m.UIPrompt
+	}
+	fields["isShared"] = m.IsShared
+	fields["searchable"] = m.Searchable
+	fields["allowContribute"] = m.AllowContribute
+	if len(m.Fields) > 0 {
+		fields["fields"] = m.Fields
+	}
+	if len(m.TemplateHistory) > 0 {
+		fields["templateHistory"] = m.TemplateHistory
+	}
+	if len(m.Sharers) > 0 {
+		fields["sharers"] = m.Sharers
+	}
+	if m.ChartKind != nil {
+		fields["chartKind"] = *m.ChartKind
+	}
+	return bson.M{
+		"_id":      m.ID,
+		"itemType": "FOLDER",
+		"fields":   fields,
+	}
+}
+
+// noteMetaToItemBson 將 NoteMeta + body 轉為 Item collection 的 bson.M
+func noteMetaToItemBson(m *mirror.NoteMeta, body string, usn int) bson.M {
+	itemType := "NOTE"
+	if m.Type == "TODO" {
+		itemType = "TODO"
+	}
+	fields := bson.M{
+		"title":    m.Title,
+		"name":     m.Title,
+		"parentID": m.ParentID,
+		"updatedAt": time.Now().UnixMilli(),
+		"isNew":    m.IsNew,
+	}
+	if usn > 0 {
+		fields["usn"] = usn
+	} else {
+		fields["usn"] = m.USN
+	}
+	tags := m.Tags
+	if tags == nil {
+		tags = []string{}
+	}
+	fields["tags"] = tags
+	if m.CreatedAt != "" {
+		fields["createdAt"] = parseTimestamp(m.CreatedAt)
+	}
+	if m.FolderID != "" {
+		fields["folderID"] = m.FolderID
+	}
+	if m.OrderAt != "" {
+		fields["orderAt"] = m.OrderAt
+	}
+	if m.Status != "" {
+		fields["status"] = m.Status
+	}
+	if m.AiTitle != "" {
+		fields["aiTitle"] = m.AiTitle
+	}
+	if m.AiTags != nil {
+		fields["aiTags"] = m.AiTags
+	}
+	if m.ImgURLs != nil {
+		fields["imgURLs"] = m.ImgURLs
+	}
+	if body != "" {
+		html, err := mirror.MarkdownToHTML(body)
+		if err != nil {
+			log.Printf("[noteMetaToItemBson] MD→HTML conversion error: %v, using raw body", err)
+			fields["content"] = body
+		} else {
+			fields["content"] = html
+		}
+	}
+	return bson.M{
+		"_id":      m.ID,
+		"itemType": itemType,
+		"fields":   fields,
+	}
+}
+
+// cardMetaToItemBson 將 CardMeta 轉為 Item collection 的 bson.M
+func cardMetaToItemBson(m *mirror.CardMeta, itemType string, usn int) bson.M {
+	if itemType == "" {
+		itemType = "CARD"
+	}
+	fields := bson.M{
+		"parentID": m.ParentID,
+		"name":     m.Name,
+	}
+	if usn > 0 {
+		fields["usn"] = usn
+	} else {
+		fields["usn"] = m.USN
+	}
+	if itemType == "CHART" {
+		if m.Fields != nil {
+			fields["data"] = *m.Fields
+		}
+	} else {
+		if m.Fields != nil {
+			fields["fields"] = *m.Fields
+		}
+		if m.Reviews != nil {
+			fields["reviews"] = *m.Reviews
+		}
+		if m.ContributorID != nil {
+			fields["contributorId"] = *m.ContributorID
+		}
+		if m.Coordinates != nil {
+			fields["coordinates"] = *m.Coordinates
+		}
+	}
+	if m.OrderAt != nil {
+		fields["orderAt"] = *m.OrderAt
+	}
+	if m.CreatedAt != "" {
+		fields["createdAt"] = parseTimestamp(m.CreatedAt)
+	}
+	if m.UpdatedAt != "" {
+		fields["updatedAt"] = parseTimestamp(m.UpdatedAt)
+	}
+	fields["isDeleted"] = m.IsDeleted
+	return bson.M{
+		"_id":      m.ID,
+		"itemType": itemType,
+		"fields":   fields,
+	}
+}
+
+// parseTimestamp 嘗試將字串解析為 int64 毫秒時間戳，失敗時回傳原字串
+func parseTimestamp(s string) interface{} {
+	if v, err := strconv.ParseInt(s, 10, 64); err == nil {
+		return v
+	}
+	return s
+}
+
 func deleteEntry(ctx context.Context, w DataWriter, userID string, e mirror.ImportEntry, usn int) error {
 	docID := e.DocID
 	if docID == "" {
 		switch e.Collection {
+		case "item":
+			if e.FolderMeta != nil {
+				docID = e.FolderMeta.ID
+			} else if e.NoteMeta != nil {
+				docID = e.NoteMeta.ID
+			} else if e.CardMeta != nil {
+				docID = e.CardMeta.ID
+			}
 		case "folder":
 			if e.FolderMeta != nil {
 				docID = e.FolderMeta.ID
@@ -205,6 +459,9 @@ func deleteEntry(ctx context.Context, w DataWriter, userID string, e mirror.Impo
 	if docID == "" {
 		log.Printf("[WriteBack] skip delete %s: no docID available", e.Path)
 		return nil
+	}
+	if e.Collection == "item" {
+		return w.DeleteItemDoc(ctx, userID, docID, usn)
 	}
 	return w.DeleteDocument(ctx, userID, e.Collection, docID, usn)
 }

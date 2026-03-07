@@ -323,3 +323,12 @@ func (n *noopDataReader) GetCard(ctx context.Context, userID, cardID string) (*m
 func (n *noopDataReader) GetChart(ctx context.Context, userID, chartID string) (*model.Chart, error) {
 	return nil, nil
 }
+func (n *noopDataReader) GetItem(ctx context.Context, userID, itemID string) (*model.Item, error) {
+	return nil, nil
+}
+func (n *noopDataReader) ListItemFolders(ctx context.Context, userID string) ([]*model.Item, error) {
+	return []*model.Item{}, nil
+}
+func (n *noopDataReader) ListAllItems(ctx context.Context, userID string) ([]*model.Item, error) {
+	return []*model.Item{}, nil
+}

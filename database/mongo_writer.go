@@ -58,9 +58,78 @@ func (m *MongoReader) UpsertChart(ctx context.Context, userID string, doc bson.M
 	return m.upsertDoc(ctx, m.chartsCol(), userID, doc)
 }
 
+// UpsertItem 以 _id 為 key 對 Item collection 做 upsert（fields.memberID 作為 filter）
+func (m *MongoReader) UpsertItem(ctx context.Context, userID string, doc bson.M) error {
+	id, ok := doc["_id"].(string)
+	if !ok || id == "" {
+		return fmt.Errorf("missing _id in item doc")
+	}
+	setDoc := make(bson.M, len(doc))
+	for k, v := range doc {
+		if k == "_id" {
+			continue
+		}
+		setDoc[k] = v
+	}
+	// 確保 fields.memberID 正確，並與既有文件比對缺失欄位做 $unset
+	var fields bson.M
+	switch typed := setDoc["fields"].(type) {
+	case bson.M:
+		fields = typed
+	case map[string]interface{}:
+		fields = bson.M(typed)
+	default:
+		fields = bson.M{}
+		setDoc["fields"] = fields
+	}
+	fields["memberID"] = userID
+
+	unsetDoc := bson.M{}
+	var existing struct {
+		Fields bson.M `bson:"fields"`
+	}
+	err := m.itemsCol().FindOne(ctx, bson.M{"_id": id, "fields.memberID": userID},
+		options.FindOne().SetProjection(bson.M{"fields": 1}),
+	).Decode(&existing)
+	if err != nil && err != mongo.ErrNoDocuments {
+		return err
+	}
+	for k := range existing.Fields {
+		if k == "memberID" {
+			continue
+		}
+		if _, exists := fields[k]; !exists {
+			unsetDoc["fields."+k] = ""
+		}
+	}
+
+	update := bson.M{"$set": setDoc}
+	if len(unsetDoc) > 0 {
+		update["$unset"] = unsetDoc
+	}
+	_, err = m.itemsCol().UpdateOne(ctx, bson.M{"_id": id, "fields.memberID": userID}, update, options.Update().SetUpsert(true))
+	return err
+}
+
+// DeleteItemDoc 從 Item collection 刪除文件並寫入 ItemDeletionLog
+func (m *MongoReader) DeleteItemDoc(ctx context.Context, userID, docID string, usn int) error {
+	res, err := m.itemsCol().DeleteOne(ctx, bson.M{"_id": docID, "fields.memberID": userID})
+	if err != nil {
+		return err
+	}
+	if res.DeletedCount > 0 {
+		if logErr := m.writeDeletionLog(ctx, userID, "item", docID, usn); logErr != nil {
+			log.Printf("[DeleteItemDoc] deletion log write error (item/%s): %v", docID, logErr)
+		}
+	}
+	return nil
+}
+
 // DeleteDocument 刪除指定 collection 的文件，並寫入對應的 Deletion Log。
-// usn 用於 deletion log 記錄，供客戶端同步刪除事件。
 func (m *MongoReader) DeleteDocument(ctx context.Context, userID, collection, docID string, usn int) error {
+	if collection == "item" {
+		return m.DeleteItemDoc(ctx, userID, docID, usn)
+	}
 	var col *mongo.Collection
 	switch collection {
 	case "note":
@@ -120,6 +189,14 @@ func (m *MongoReader) writeDeletionLog(ctx context.Context, userID, collection, 
 			"memberID":  userID,
 			"deletedAt": nowStr,
 			"usn":       usn,
+		})
+		return err
+	case "item":
+		_, err := m.db.Collection("ItemDeletionLog").InsertOne(ctx, bson.M{
+			"itemID":   docID,
+			"memberID": userID,
+			"deleteAt": now,
+			"usn":      usn,
 		})
 		return err
 	default:

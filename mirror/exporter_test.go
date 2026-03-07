@@ -143,6 +143,57 @@ func TestExportChart_WritesJSONFile(t *testing.T) {
 	}
 }
 
+func TestExportCard_RemovesOldPathBySameID(t *testing.T) {
+	exp, fs := newTestExporter()
+	err := exp.ExportCard("user1", CardMeta{
+		ID:       "card1",
+		ParentID: "c1",
+		Name:     "舊名稱",
+		Fields:   strPtr(`{"店名":"鼎泰豐"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = exp.ExportCard("user1", CardMeta{
+		ID:       "card1",
+		ParentID: "c1",
+		Name:     "新名稱",
+		Fields:   strPtr(`{"店名":"鼎泰豐"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fs.Exists("user1/CARD/美食清單/舊名稱.json") {
+		t.Fatal("舊 card 路徑應被清理")
+	}
+	if !fs.Exists("user1/CARD/美食清單/新名稱.json") {
+		t.Fatal("新 card 路徑應存在")
+	}
+}
+
+func TestExportFolder_RemovesOldPathBySameID(t *testing.T) {
+	exp, fs := newTestExporter()
+	noteType := "NOTE"
+	oldFolderJSON := `{"id":"f1","memberID":"user1","folderName":"舊工作","type":"NOTE","usn":1,"createdAt":"0","updatedAt":"0"}`
+	if err := fs.WriteFile("user1/NOTE/舊工作/_folder.json", []byte(oldFolderJSON)); err != nil {
+		t.Fatal(err)
+	}
+	if err := exp.ExportFolder("user1", FolderMeta{
+		ID:         "f1",
+		MemberID:   "user1",
+		FolderName: "工作",
+		Type:       &noteType,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if fs.Exists("user1/NOTE/舊工作") {
+		t.Fatal("舊 folder 路徑應被清理")
+	}
+	if !fs.Exists("user1/NOTE/工作/_folder.json") {
+		t.Fatal("新 folder 路徑應存在")
+	}
+}
+
 func TestDeleteFolder_RemovesDirectory(t *testing.T) {
 	exp, fs := newTestExporter()
 	noteType := "NOTE"

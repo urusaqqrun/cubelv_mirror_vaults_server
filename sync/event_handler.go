@@ -34,6 +34,8 @@ type DataReader interface {
 	GetNote(ctx context.Context, userID, noteID string) (*model.Note, error)
 	GetCard(ctx context.Context, userID, cardID string) (*model.Card, error)
 	GetChart(ctx context.Context, userID, chartID string) (*model.Chart, error)
+	GetItem(ctx context.Context, userID, itemID string) (*model.Item, error)
+	ListItemFolders(ctx context.Context, userID string) ([]*model.Item, error)
 }
 
 // resolverEntry PathResolver 快取項目
@@ -64,13 +66,18 @@ func (h *SyncEventHandler) SetLocker(locker VaultLocker) {
 }
 
 func (h *SyncEventHandler) HandleEvent(ctx context.Context, event SyncEvent) error {
-	// AI 任務執行中，拒絕寫入該用戶的 Vault，讓訊息留在 PEL 稍後重試
 	if h.locker != nil && h.locker.IsLocked(event.UserID) {
 		return ErrVaultLocked
 	}
 
-	// folder 變更時清除 PathResolver 快取
-	if strings.ToLower(event.Collection) == "folder" {
+	col := strings.ToLower(event.Collection)
+
+	// item 事件：需先讀取 item 判斷 itemType 再決定是否清除 PathResolver
+	if col == "item" {
+		return h.handleItemEvent(ctx, event)
+	}
+
+	if col == "folder" {
 		h.InvalidateResolver(event.UserID)
 	}
 
@@ -82,6 +89,107 @@ func (h *SyncEventHandler) HandleEvent(ctx context.Context, event SyncEvent) err
 	default:
 		return nil
 	}
+}
+
+// handleItemEvent 處理 collection="item" 的統一事件
+func (h *SyncEventHandler) handleItemEvent(ctx context.Context, event SyncEvent) error {
+	action := strings.ToLower(event.Action)
+
+	if action == "delete" {
+		return h.deleteItemByDocID(ctx, event.UserID, event.DocID)
+	}
+
+	item, err := h.reader.GetItem(ctx, event.UserID, event.DocID)
+	if err != nil {
+		return err
+	}
+	if item == nil {
+		return nil
+	}
+
+	// FOLDER 變更時清除 PathResolver 快取
+	if item.Type == model.ItemTypeFolder {
+		h.InvalidateResolver(event.UserID)
+	}
+
+	resolver, err := h.getResolver(ctx, event.UserID)
+	if err != nil {
+		return err
+	}
+	exporter := mirror.NewExporter(h.fs, resolver)
+
+	switch item.Type {
+	case model.ItemTypeFolder:
+		meta := mirror.ItemToFolderMeta(item)
+		return exporter.ExportFolder(event.UserID, meta)
+	case model.ItemTypeNote, model.ItemTypeTodo:
+		meta, content := mirror.ItemToNoteMeta(item)
+		return exporter.ExportNote(event.UserID, meta, content)
+	case model.ItemTypeCard:
+		meta := mirror.ItemToCardMeta(item)
+		return exporter.ExportCard(event.UserID, meta)
+	case model.ItemTypeChart:
+		meta := mirror.ItemToChartMeta(item)
+		return exporter.ExportChart(event.UserID, meta)
+	default:
+		log.Printf("[handleItemEvent] unknown itemType %q for %s", item.Type, event.DocID)
+		return nil
+	}
+}
+
+// deleteItemByDocID 刪除 item 對應的 EFS 檔案（不知道 itemType，需 walk 搜尋）
+func (h *SyncEventHandler) deleteItemByDocID(ctx context.Context, userID, docID string) error {
+	root := userID
+	var target string
+	var isFolder bool
+
+	walkErr := h.fs.Walk(root, func(path string, info fs.FileInfo, err error) error {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err != nil || info == nil || info.IsDir() {
+			return nil
+		}
+		data, rErr := h.fs.ReadFile(path)
+		if rErr != nil {
+			return nil
+		}
+		if strings.HasSuffix(path, "_folder.json") {
+			meta, jErr := mirror.JSONToFolder(data)
+			if jErr == nil && meta.ID == docID {
+				target = filepath.Dir(path)
+				isFolder = true
+				return errFound
+			}
+		} else if strings.HasSuffix(path, ".md") {
+			meta, _, pErr := mirror.MarkdownToNote(string(data))
+			if pErr == nil && meta.ID == docID {
+				target = path
+				return errFound
+			}
+		} else if strings.HasSuffix(path, ".json") {
+			var card map[string]any
+			if jErr := json.Unmarshal(data, &card); jErr == nil {
+				if id, ok := card["id"].(string); ok && id == docID {
+					target = path
+					return errFound
+				}
+			}
+		}
+		return nil
+	})
+
+	if walkErr != nil && !errors.Is(walkErr, errFound) {
+		return walkErr
+	}
+	if target == "" {
+		return nil
+	}
+	if isFolder {
+		h.InvalidateResolver(userID)
+		return h.fs.RemoveAll(target)
+	}
+	return h.fs.Remove(target)
 }
 
 func (h *SyncEventHandler) exportByDocID(ctx context.Context, userID, collection, docID string) error {
@@ -207,11 +315,11 @@ func (h *SyncEventHandler) getResolver(ctx context.Context, userID string) (*mir
 	}
 	h.mu.Unlock()
 
-	folders, err := h.reader.ListFolders(ctx, userID)
+	items, err := h.reader.ListItemFolders(ctx, userID)
 	if err != nil {
-		return nil, fmt.Errorf("list folders: %w", err)
+		return nil, fmt.Errorf("list item folders: %w", err)
 	}
-	resolver := buildPathResolver(folders)
+	resolver := buildPathResolverFromItems(items)
 
 	h.mu.Lock()
 	h.resolverCache[userID] = &resolverEntry{resolver: resolver, expiresAt: time.Now().Add(resolverCacheTTL)}
@@ -227,13 +335,18 @@ func (h *SyncEventHandler) InvalidateResolver(userID string) {
 	h.mu.Unlock()
 }
 
-func buildPathResolver(folders []*model.Folder) *mirror.PathResolver {
-	nodes := make([]mirror.FolderNode, 0, len(folders))
-	for _, f := range folders {
-		if f == nil {
+func buildPathResolverFromItems(items []*model.Item) *mirror.PathResolver {
+	nodes := make([]mirror.FolderNode, 0, len(items))
+	for _, item := range items {
+		if item == nil {
 			continue
 		}
-		nodes = append(nodes, mirror.FolderNode{ID: f.ID, FolderName: f.FolderName, Type: f.GetType(), ParentID: f.ParentID})
+		nodes = append(nodes, mirror.FolderNode{
+			ID:         item.ID,
+			FolderName: item.GetName(),
+			Type:       mirror.ItemFolderType(item),
+			ParentID:   model.StrPtrField(item.Fields, "parentID"),
+		})
 	}
 	return mirror.NewPathResolver(nodes)
 }

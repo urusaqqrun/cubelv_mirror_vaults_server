@@ -36,6 +36,30 @@ func (m *mockDataReader) GetCard(_ context.Context, _ string, id string) (*model
 func (m *mockDataReader) GetChart(_ context.Context, _ string, id string) (*model.Chart, error) {
 	return m.charts[id], nil
 }
+func (m *mockDataReader) GetItem(_ context.Context, _ string, _ string) (*model.Item, error) {
+	return nil, nil
+}
+func (m *mockDataReader) ListItemFolders(_ context.Context, _ string) ([]*model.Item, error) {
+	items := make([]*model.Item, 0, len(m.folders))
+	for _, f := range m.folders {
+		ft := f.GetType()
+		parentID := ""
+		if f.ParentID != nil {
+			parentID = *f.ParentID
+		}
+		items = append(items, &model.Item{
+			ID:   f.ID,
+			Type: "FOLDER",
+			Fields: map[string]interface{}{
+				"memberID":   f.MemberID,
+				"name":       f.FolderName,
+				"folderType": ft,
+				"parentID":   parentID,
+			},
+		})
+	}
+	return items, nil
+}
 
 func ptr(s string) *string { return &s }
 
@@ -187,15 +211,15 @@ func TestHandleEvent_VaultUnlocked_ProcessesNormally(t *testing.T) {
 	}
 }
 
-// countingDataReader 記錄 ListFolders 呼叫次數
+// countingDataReader 記錄 ListItemFolders 呼叫次數
 type countingDataReader struct {
 	mockDataReader
 	listFoldersCalls int32
 }
 
-func (m *countingDataReader) ListFolders(ctx context.Context, userID string) ([]*model.Folder, error) {
+func (m *countingDataReader) ListItemFolders(ctx context.Context, userID string) ([]*model.Item, error) {
 	atomic.AddInt32(&m.listFoldersCalls, 1)
-	return m.mockDataReader.ListFolders(ctx, userID)
+	return m.mockDataReader.ListItemFolders(ctx, userID)
 }
 
 func TestResolverCache_ReducesListFoldersCalls(t *testing.T) {
@@ -220,7 +244,7 @@ func TestResolverCache_ReducesListFoldersCalls(t *testing.T) {
 
 	h := NewSyncEventHandler(fs, reader)
 
-	// 同一用戶連續 5 個 note 事件，應只查 1 次 ListFolders（快取命中）
+	// 同一用戶連續 5 個 note 事件，應只查 1 次 ListItemFolders（快取命中）
 	for i := 0; i < 5; i++ {
 		docID := "n1"
 		if i%2 == 1 {
@@ -233,9 +257,9 @@ func TestResolverCache_ReducesListFoldersCalls(t *testing.T) {
 
 	calls := atomic.LoadInt32(&reader.listFoldersCalls)
 	if calls > 1 {
-		t.Errorf("expected ListFolders called <= 1 time (cached), got %d", calls)
+		t.Errorf("expected ListItemFolders called <= 1 time (cached), got %d", calls)
 	}
-	t.Logf("ListFolders calls for 5 events: %d", calls)
+	t.Logf("ListItemFolders calls for 5 events: %d", calls)
 }
 
 func TestResolverCache_InvalidatedOnFolderEvent(t *testing.T) {
@@ -258,7 +282,7 @@ func TestResolverCache_InvalidatedOnFolderEvent(t *testing.T) {
 
 	h := NewSyncEventHandler(fs, reader)
 
-	// 第一次 note 事件：cache miss → 查 1 次 ListFolders
+	// 第一次 note 事件：cache miss → 查 1 次 ListItemFolders
 	h.HandleEvent(context.Background(), SyncEvent{
 		Collection: "note", UserID: "u1", DocID: "n1", Action: "update",
 	})
@@ -268,7 +292,7 @@ func TestResolverCache_InvalidatedOnFolderEvent(t *testing.T) {
 		Collection: "folder", UserID: "u1", DocID: "f1", Action: "update",
 	})
 
-	// 第二次 note 事件：cache 已 invalidated → 再查 1 次 ListFolders
+	// 第二次 note 事件：cache 已 invalidated → 再查 1 次 ListItemFolders
 	h.HandleEvent(context.Background(), SyncEvent{
 		Collection: "note", UserID: "u1", DocID: "n1", Action: "update",
 	})
@@ -277,9 +301,9 @@ func TestResolverCache_InvalidatedOnFolderEvent(t *testing.T) {
 	// 第 1 次 note = 1（cache miss），folder update invalidates + rebuilds = 1，
 	// 第 2 次 note 命中 folder 事件重建的快取 → 共 2 次
 	if calls != 2 {
-		t.Errorf("expected ListFolders == 2 (cache invalidated then rebuilt by folder event), got %d", calls)
+		t.Errorf("expected ListItemFolders == 2 (cache invalidated then rebuilt by folder event), got %d", calls)
 	}
-	t.Logf("ListFolders calls after folder invalidation: %d", calls)
+	t.Logf("ListItemFolders calls after folder invalidation: %d", calls)
 }
 
 func TestEventPipeline_CardCreate_ExportsCardJSON(t *testing.T) {

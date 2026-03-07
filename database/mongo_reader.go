@@ -3,7 +3,7 @@ package database
 import (
 	"context"
 	"fmt"
-	"sync"
+	"sort"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -51,6 +51,7 @@ func (m *MongoReader) foldersCol() *mongo.Collection { return m.db.Collection("F
 func (m *MongoReader) notesCol() *mongo.Collection   { return m.db.Collection("Note") }
 func (m *MongoReader) cardsCol() *mongo.Collection   { return m.db.Collection("Card") }
 func (m *MongoReader) chartsCol() *mongo.Collection  { return m.db.Collection("Chart") }
+func (m *MongoReader) itemsCol() *mongo.Collection   { return m.db.Collection("Item") }
 
 func (m *MongoReader) ListFolders(ctx context.Context, userID string) ([]*model.Folder, error) {
 	cur, err := m.foldersCol().Find(ctx, bson.M{"memberID": userID})
@@ -118,118 +119,171 @@ func (m *MongoReader) GetChart(ctx context.Context, userID, chartID string) (*mo
 	return &c, nil
 }
 
-// GetLatestUSN 回傳用戶四個集合中的最大 USN（並行查詢）。
+// GetItem 從 Item collection 讀取單一 item
+func (m *MongoReader) GetItem(ctx context.Context, userID, itemID string) (*model.Item, error) {
+	var item model.Item
+	err := m.itemsCol().FindOne(ctx, bson.M{"_id": itemID, "fields.memberID": userID}).Decode(&item)
+	if err == mongo.ErrNoDocuments {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &item, nil
+}
+
+// ListItemFolders 從 Item collection 查詢 itemType=FOLDER 的 items，用於建構 PathResolver
+func (m *MongoReader) ListItemFolders(ctx context.Context, userID string) ([]*model.Item, error) {
+	cur, err := m.itemsCol().Find(ctx, bson.M{
+		"itemType":         "FOLDER",
+		"fields.memberID":  userID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer cur.Close(ctx)
+	var out []*model.Item
+	for cur.Next(ctx) {
+		var item model.Item
+		if err := cur.Decode(&item); err != nil {
+			continue
+		}
+		out = append(out, &item)
+	}
+	return out, cur.Err()
+}
+
+// GetLatestUSN 從 Item collection 取得用戶最大 USN
 func (m *MongoReader) GetLatestUSN(ctx context.Context, userID string) (int, error) {
-	cols := []*mongo.Collection{m.foldersCol(), m.notesCol(), m.cardsCol(), m.chartsCol()}
-	results := make([]int, len(cols))
-	var wg sync.WaitGroup
-	wg.Add(len(cols))
-	for i, col := range cols {
-		go func(idx int, c *mongo.Collection) {
-			defer wg.Done()
-			opts := options.FindOne().SetSort(bson.D{{Key: "usn", Value: -1}})
-			var row struct {
-				Usn int `bson:"usn"`
-			}
-			if err := c.FindOne(ctx, bson.M{"memberID": userID}, opts).Decode(&row); err == nil {
-				results[idx] = row.Usn
-			}
-		}(i, col)
+	opts := options.FindOne().
+		SetSort(bson.D{{Key: "fields.usn", Value: -1}}).
+		SetProjection(bson.M{"fields.usn": 1})
+	var row struct {
+		Fields struct {
+			Usn int `bson:"usn"`
+		} `bson:"fields"`
 	}
-	wg.Wait()
+	latestItemUSN := 0
+	err := m.itemsCol().FindOne(ctx, bson.M{"fields.memberID": userID}, opts).Decode(&row)
+	if err != nil && err != mongo.ErrNoDocuments {
+		return 0, err
+	}
+	if err == nil {
+		latestItemUSN = row.Fields.Usn
+	}
 
-	maxUSN := 0
-	for _, v := range results {
-		if v > maxUSN {
-			maxUSN = v
-		}
+	var delRow struct {
+		USN int `bson:"usn"`
 	}
-	return maxUSN, nil
+	delErr := m.db.Collection("ItemDeletionLog").FindOne(ctx,
+		bson.M{"memberID": userID},
+		options.FindOne().SetSort(bson.D{{Key: "usn", Value: -1}}).SetProjection(bson.M{"usn": 1}),
+	).Decode(&delRow)
+	if delErr != nil && delErr != mongo.ErrNoDocuments {
+		return 0, delErr
+	}
+	if delRow.USN > latestItemUSN {
+		return delRow.USN, nil
+	}
+	return latestItemUSN, nil
 }
 
-// GetChangesAfterUSN 回傳大於指定 USN 的變更（兜底用途，action 統一為 update）。
-// 四個集合並行查詢以減少延遲。
+// GetChangesAfterUSN 從 Item collection 回傳大於指定 USN 的變更（兜底用途）。
 func (m *MongoReader) GetChangesAfterUSN(ctx context.Context, userID string, afterUSN int) ([]vaultsync.SyncEvent, error) {
-	type colTask struct {
-		col  *mongo.Collection
-		name string
+	cur, err := m.itemsCol().Find(ctx, bson.M{
+		"fields.memberID": userID,
+		"fields.usn":      bson.M{"$gt": afterUSN},
+	})
+	if err != nil {
+		return nil, err
 	}
-	tasks := []colTask{
-		{m.foldersCol(), "folder"},
-		{m.notesCol(), "note"},
-		{m.cardsCol(), "card"},
-		{m.chartsCol(), "chart"},
-	}
+	defer cur.Close(ctx)
 
-	type result struct {
-		events []vaultsync.SyncEvent
-		err    error
+	type usnEvent struct {
+		usn   int
+		event vaultsync.SyncEvent
 	}
-	results := make([]result, len(tasks))
-	var wg sync.WaitGroup
-	wg.Add(len(tasks))
-
 	ts := time.Now().UnixMilli()
-	for i, t := range tasks {
-		go func(idx int, col *mongo.Collection, collection string) {
-			defer wg.Done()
-			cur, err := col.Find(ctx, bson.M{"memberID": userID, "usn": bson.M{"$gt": afterUSN}})
-			if err != nil {
-				results[idx] = result{err: err}
-				return
-			}
-			defer cur.Close(ctx)
-			var evts []vaultsync.SyncEvent
-			for cur.Next(ctx) {
-				var row struct {
-					ID  string `bson:"_id"`
-					Usn int    `bson:"usn"`
-				}
-				if err := cur.Decode(&row); err != nil || row.ID == "" {
-					continue
-				}
-				evts = append(evts, vaultsync.SyncEvent{
-					Collection: collection,
-					UserID:     userID,
-					DocID:      row.ID,
-					Action:     "update",
-					Timestamp:  ts,
-				})
-			}
-			results[idx] = result{events: evts, err: cur.Err()}
-		}(i, t.col, t.name)
-	}
-	wg.Wait()
-
-	var allEvents []vaultsync.SyncEvent
-	for _, r := range results {
-		if r.err != nil {
-			return nil, r.err
+	var events []usnEvent
+	for cur.Next(ctx) {
+		var row struct {
+			ID     string `bson:"_id"`
+			Fields struct {
+				Usn int `bson:"usn"`
+			} `bson:"fields"`
 		}
-		allEvents = append(allEvents, r.events...)
+		if err := cur.Decode(&row); err != nil || row.ID == "" {
+			continue
+		}
+		events = append(events, usnEvent{
+			usn: row.Fields.Usn,
+			event: vaultsync.SyncEvent{
+				Collection: "item",
+				UserID:     userID,
+				DocID:      row.ID,
+				Action:     "update",
+				Timestamp:  ts,
+			},
+		})
 	}
-	return allEvents, nil
+	if err := cur.Err(); err != nil {
+		return nil, err
+	}
+
+	delCur, err := m.db.Collection("ItemDeletionLog").Find(ctx, bson.M{
+		"memberID": userID,
+		"usn":      bson.M{"$gt": afterUSN},
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer delCur.Close(ctx)
+	for delCur.Next(ctx) {
+		var row struct {
+			ItemID string `bson:"itemID"`
+			USN    int    `bson:"usn"`
+		}
+		if err := delCur.Decode(&row); err != nil || row.ItemID == "" {
+			continue
+		}
+		events = append(events, usnEvent{
+			usn: row.USN,
+			event: vaultsync.SyncEvent{
+				Collection: "item",
+				UserID:     userID,
+				DocID:      row.ItemID,
+				Action:     "delete",
+				Timestamp:  ts,
+			},
+		})
+	}
+	if err := delCur.Err(); err != nil {
+		return nil, err
+	}
+
+	sort.Slice(events, func(i, j int) bool {
+		if events[i].usn == events[j].usn {
+			return events[i].event.DocID < events[j].event.DocID
+		}
+		return events[i].usn < events[j].usn
+	})
+	out := make([]vaultsync.SyncEvent, 0, len(events))
+	for _, e := range events {
+		out = append(out, e.event)
+	}
+	return out, nil
 }
 
-// GetDocUSN 查詢指定文件的當前 USN（衝突判定用）。
+// GetDocUSN 從 Item collection 查詢文件當前 USN（衝突判定用）。
 // 文件不存在時回傳 -1。
 func (m *MongoReader) GetDocUSN(ctx context.Context, userID, collection, docID string) (int, error) {
-	var col *mongo.Collection
-	switch collection {
-	case "note":
-		col = m.notesCol()
-	case "card":
-		col = m.cardsCol()
-	case "chart":
-		col = m.chartsCol()
-	default:
-		col = m.foldersCol()
-	}
 	var row struct {
-		Usn int `bson:"usn"`
+		Fields struct {
+			Usn int `bson:"usn"`
+		} `bson:"fields"`
 	}
-	err := col.FindOne(ctx, bson.M{"_id": docID, "memberID": userID},
-		options.FindOne().SetProjection(bson.M{"usn": 1}),
+	err := m.itemsCol().FindOne(ctx, bson.M{"_id": docID, "fields.memberID": userID},
+		options.FindOne().SetProjection(bson.M{"fields.usn": 1}),
 	).Decode(&row)
 	if err == mongo.ErrNoDocuments {
 		return -1, nil
@@ -237,11 +291,29 @@ func (m *MongoReader) GetDocUSN(ctx context.Context, userID, collection, docID s
 	if err != nil {
 		return 0, err
 	}
-	return row.Usn, nil
+	return row.Fields.Usn, nil
+}
+
+// ListAllItems 從 Item collection 取得用戶所有 items（全量匯出用）
+func (m *MongoReader) ListAllItems(ctx context.Context, userID string) ([]*model.Item, error) {
+	cur, err := m.itemsCol().Find(ctx, bson.M{"fields.memberID": userID})
+	if err != nil {
+		return nil, err
+	}
+	defer cur.Close(ctx)
+	var out []*model.Item
+	for cur.Next(ctx) {
+		var item model.Item
+		if err := cur.Decode(&item); err != nil {
+			continue
+		}
+		out = append(out, &item)
+	}
+	return out, cur.Err()
 }
 
 func (m *MongoReader) ListActiveUsers(ctx context.Context) ([]string, error) {
-	res, err := m.foldersCol().Distinct(ctx, "memberID", bson.M{})
+	res, err := m.itemsCol().Distinct(ctx, "fields.memberID", bson.M{})
 	if err != nil {
 		return nil, err
 	}

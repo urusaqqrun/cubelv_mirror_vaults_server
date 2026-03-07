@@ -1,10 +1,14 @@
 package mirror
 
 import (
+	"encoding/json"
 	"fmt"
 	"io/fs"
+	"log"
 	"path/filepath"
 	"strings"
+
+	"golang.org/x/sync/errgroup"
 )
 
 // Exporter 負責 MongoDB 資料 → Vault 檔案的匯出
@@ -25,6 +29,7 @@ func (e *Exporter) ExportFolder(userId string, meta FolderMeta) error {
 	}
 
 	fullPath := filepath.Join(userId, folderPath)
+	e.cleanupOldFolderPath(userId, meta.ID, fullPath)
 	if err := e.fs.MkdirAll(fullPath); err != nil {
 		return fmt.Errorf("mkdir: %w", err)
 	}
@@ -70,7 +75,9 @@ func (e *Exporter) ExportCard(userId string, meta CardMeta) error {
 		return fmt.Errorf("card to json: %w", err)
 	}
 
-	return e.fs.WriteFile(filepath.Join(userId, cardPath), data)
+	fullPath := filepath.Join(userId, cardPath)
+	e.cleanupOldCardPath(userId, meta.ID, fullPath)
+	return e.fs.WriteFile(fullPath, data)
 }
 
 // ExportChart 匯出 Chart 為 .json 檔案
@@ -85,7 +92,9 @@ func (e *Exporter) ExportChart(userId string, meta CardMeta) error {
 		return fmt.Errorf("chart to json: %w", err)
 	}
 
-	return e.fs.WriteFile(filepath.Join(userId, chartPath), data)
+	fullPath := filepath.Join(userId, chartPath)
+	e.cleanupOldCardPath(userId, meta.ID, fullPath)
+	return e.fs.WriteFile(fullPath, data)
 }
 
 // DeleteFolder 刪除 Folder 對應的整個目錄
@@ -140,6 +149,52 @@ func (e *Exporter) cleanupOldNoteFile(userId string, noteID string, newFullPath 
 	})
 }
 
+// ExportBatchEntry 批次匯出項目
+type ExportBatchEntry struct {
+	ItemType   string
+	FolderMeta *FolderMeta
+	NoteMeta   *NoteMeta
+	NoteHTML   string
+	CardMeta   *CardMeta
+}
+
+// ExportBatch 使用 errgroup 並行寫入多個檔案到 EFS（上限 8 goroutines）
+func (e *Exporter) ExportBatch(userId string, entries []ExportBatchEntry) error {
+	g := new(errgroup.Group)
+	g.SetLimit(8)
+	for _, entry := range entries {
+		entry := entry
+		g.Go(func() error {
+			switch entry.ItemType {
+			case "FOLDER":
+				if entry.FolderMeta == nil {
+					return nil
+				}
+				return e.ExportFolder(userId, *entry.FolderMeta)
+			case "NOTE", "TODO":
+				if entry.NoteMeta == nil {
+					return nil
+				}
+				return e.ExportNote(userId, *entry.NoteMeta, entry.NoteHTML)
+			case "CARD":
+				if entry.CardMeta == nil {
+					return nil
+				}
+				return e.ExportCard(userId, *entry.CardMeta)
+			case "CHART":
+				if entry.CardMeta == nil {
+					return nil
+				}
+				return e.ExportChart(userId, *entry.CardMeta)
+			default:
+				log.Printf("[ExportBatch] unknown itemType: %s", entry.ItemType)
+				return nil
+			}
+		})
+	}
+	return g.Wait()
+}
+
 // removeOldNoteInDir 掃描單一目錄，找到同 ID 舊檔就刪除並回傳 true。
 func (e *Exporter) removeOldNoteInDir(dir string, noteID string, excludePath string) bool {
 	entries, err := e.fs.ListDir(dir)
@@ -168,4 +223,59 @@ func (e *Exporter) removeOldNoteInDir(dir string, noteID string, excludePath str
 		}
 	}
 	return false
+}
+
+// cleanupOldFolderPath 清理同 ID 但舊位置的資料夾（搬移/改名情境）
+func (e *Exporter) cleanupOldFolderPath(userID string, folderID string, newFolderPath string) {
+	oldFolderPath := ""
+	e.fs.Walk(userID, func(path string, info fs.FileInfo, err error) error {
+		if err != nil || info == nil || info.IsDir() || !strings.HasSuffix(path, "_folder.json") {
+			return nil
+		}
+		data, rErr := e.fs.ReadFile(path)
+		if rErr != nil {
+			return nil
+		}
+		meta, pErr := JSONToFolder(data)
+		if pErr != nil || meta.ID != folderID {
+			return nil
+		}
+		if pathDir := filepath.Dir(path); pathDir != newFolderPath {
+			oldFolderPath = pathDir
+		}
+		return filepath.SkipAll
+	})
+	if oldFolderPath != "" {
+		_ = e.fs.RemoveAll(oldFolderPath)
+	}
+}
+
+// cleanupOldCardPath 清理同 ID 但舊位置的 card/chart JSON 檔
+func (e *Exporter) cleanupOldCardPath(userID string, docID string, newPath string) {
+	oldPath := ""
+	e.fs.Walk(userID, func(path string, info fs.FileInfo, err error) error {
+		if err != nil || info == nil || info.IsDir() {
+			return nil
+		}
+		if !strings.HasSuffix(path, ".json") || strings.HasSuffix(path, "_folder.json") || path == newPath {
+			return nil
+		}
+		data, rErr := e.fs.ReadFile(path)
+		if rErr != nil {
+			return nil
+		}
+		var payload map[string]interface{}
+		if uErr := json.Unmarshal(data, &payload); uErr != nil {
+			return nil
+		}
+		id, _ := payload["id"].(string)
+		if id == docID {
+			oldPath = path
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	if oldPath != "" {
+		_ = e.fs.Remove(oldPath)
+	}
 }

@@ -21,12 +21,13 @@ const (
 // ImportEntry 單筆回寫項目
 type ImportEntry struct {
 	Action     ImportAction
-	Collection string // folder / note / card / chart
+	Collection string // "item"（統一寫入 Item collection）
+	ItemType   string // FOLDER / NOTE / TODO / CARD / CHART（回寫 Item 時用）
 	Path       string
 	OldPath    string // 搬移時的舊路徑
 	DocID      string // 刪除時從 beforeIDMap 取得
 
-	// 解析後的資料（依 Collection 填入對應欄位）
+	// 解析後的資料（依 ItemType 填入對應欄位）
 	FolderMeta *FolderMeta
 	NoteMeta   *NoteMeta
 	NoteBody   string // Markdown 原文（不含 frontmatter）
@@ -67,7 +68,8 @@ func (imp *Importer) ProcessDiff(userId string, created, modified, deleted []str
 	for _, path := range deleted {
 		entry := ImportEntry{
 			Action:     ImportActionDelete,
-			Collection: detectCollection(path),
+			Collection: "item",
+			ItemType:   detectItemType(path),
 			Path:       path,
 		}
 		if beforeIDMap != nil {
@@ -90,7 +92,7 @@ func (imp *Importer) ProcessDiff(userId string, created, modified, deleted []str
 	return entries, nil
 }
 
-// parseFile 解析 Vault 中的檔案內容
+// parseFile 解析 Vault 中的檔案內容，統一回寫到 Item collection
 func (imp *Importer) parseFile(userId, path string, action ImportAction) (ImportEntry, error) {
 	fullPath := filepath.Join(userId, path)
 	data, err := imp.fs.ReadFile(fullPath)
@@ -98,22 +100,23 @@ func (imp *Importer) parseFile(userId, path string, action ImportAction) (Import
 		return ImportEntry{}, fmt.Errorf("read %s: %w", fullPath, err)
 	}
 
-	collection := detectCollection(path)
+	itemType := detectItemType(path)
 	entry := ImportEntry{
 		Action:     action,
-		Collection: collection,
+		Collection: "item",
+		ItemType:   itemType,
 		Path:       path,
 	}
 
-	switch collection {
-	case "folder":
+	switch itemType {
+	case "FOLDER":
 		var meta FolderMeta
 		if err := json.Unmarshal(data, &meta); err != nil {
 			return entry, fmt.Errorf("parse folder json: %w", err)
 		}
 		entry.FolderMeta = &meta
 
-	case "note":
+	case "NOTE", "TODO":
 		meta, body, err := MarkdownToNote(string(data))
 		if err != nil {
 			return entry, fmt.Errorf("parse note md: %w", err)
@@ -122,7 +125,7 @@ func (imp *Importer) parseFile(userId, path string, action ImportAction) (Import
 		entry.NoteBody = body
 		entry.HTMLHash = meta.HTMLHash
 
-	case "card", "chart":
+	case "CARD", "CHART":
 		var meta CardMeta
 		if err := json.Unmarshal(data, &meta); err != nil {
 			return entry, fmt.Errorf("parse card/chart json: %w", err)
@@ -139,28 +142,33 @@ type MovedFileEntry struct {
 	NewPath string
 }
 
-// detectCollection 從路徑推斷 collection 類型
-func detectCollection(path string) string {
+// detectItemType 從路徑推斷 Item 的 itemType
+func detectItemType(path string) string {
 	if strings.HasSuffix(path, "_folder.json") {
-		return "folder"
+		return "FOLDER"
 	}
 
 	parts := strings.SplitN(path, "/", 2)
 	if len(parts) == 0 {
-		return "note"
+		return "NOTE"
 	}
 
 	switch strings.ToUpper(parts[0]) {
 	case "CARD":
-		return "card"
+		return "CARD"
 	case "CHART":
-		return "chart"
+		return "CHART"
 	case "TODO":
-		return "note"
+		return "TODO"
 	default:
 		if strings.HasSuffix(path, ".json") {
-			return "card"
+			return "CARD"
 		}
-		return "note"
+		return "NOTE"
 	}
+}
+
+// detectCollection 從路徑推斷 collection 類型（向後相容，統一回傳 "item"）
+func detectCollection(path string) string {
+	return "item"
 }
