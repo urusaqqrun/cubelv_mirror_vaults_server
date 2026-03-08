@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"fmt"
+	"log"
 	"sort"
 	"time"
 
@@ -64,6 +65,7 @@ func (m *MongoReader) ListFolders(ctx context.Context, userID string) ([]*model.
 	for cur.Next(ctx) {
 		var f model.Folder
 		if err := cur.Decode(&f); err != nil {
+			log.Printf("[ListFolders] decode error: %v", err)
 			continue
 		}
 		out = append(out, &f)
@@ -149,6 +151,7 @@ func (m *MongoReader) ListItemFolders(ctx context.Context, userID string) ([]*mo
 	for cur.Next(ctx) {
 		var item model.Item
 		if err := cur.Decode(&item); err != nil {
+			log.Printf("[ListItemFolders] decode error: %v", err)
 			continue
 		}
 		out = append(out, &item)
@@ -215,7 +218,11 @@ func (m *MongoReader) GetChangesAfterUSN(ctx context.Context, userID string, aft
 				Usn int `bson:"usn"`
 			} `bson:"fields"`
 		}
-		if err := cur.Decode(&row); err != nil || row.ID == "" {
+		if err := cur.Decode(&row); err != nil {
+			log.Printf("[GetChangesAfterUSN] decode item error: %v", err)
+			continue
+		}
+		if row.ID == "" {
 			continue
 		}
 		events = append(events, usnEvent{
@@ -246,7 +253,11 @@ func (m *MongoReader) GetChangesAfterUSN(ctx context.Context, userID string, aft
 			ItemID string `bson:"itemID"`
 			USN    int    `bson:"usn"`
 		}
-		if err := delCur.Decode(&row); err != nil || row.ItemID == "" {
+		if err := delCur.Decode(&row); err != nil {
+			log.Printf("[GetChangesAfterUSN] decode deletion log error: %v", err)
+			continue
+		}
+		if row.ItemID == "" {
 			continue
 		}
 		events = append(events, usnEvent{
@@ -308,6 +319,7 @@ func (m *MongoReader) ListAllItems(ctx context.Context, userID string) ([]*model
 	for cur.Next(ctx) {
 		var item model.Item
 		if err := cur.Decode(&item); err != nil {
+			log.Printf("[ListAllItems] decode error: %v", err)
 			continue
 		}
 		out = append(out, &item)

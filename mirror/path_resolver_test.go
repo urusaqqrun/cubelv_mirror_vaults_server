@@ -118,9 +118,12 @@ func TestResolveFolderPath_OrphanParentID(t *testing.T) {
 	r := NewPathResolver([]FolderNode{
 		{ID: "f1", FolderName: "孤兒", Type: "NOTE", ParentID: strPtr("nonexistent")},
 	})
-	_, err := r.ResolveFolderPath("f1")
-	if err == nil {
-		t.Error("expected error for orphan parentID, got nil")
+	got, err := r.ResolveFolderPath("f1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "_unsorted" {
+		t.Errorf("got %q, want %q", got, "_unsorted")
 	}
 }
 
@@ -217,6 +220,19 @@ func TestResolveFolderPath_SpecialCharactersInName(t *testing.T) {
 	// 斜線應被替換，避免路徑衝突
 	if got != "NOTE/工作_專案" {
 		t.Errorf("got %q, want %q", got, "NOTE/工作_專案")
+	}
+}
+
+func TestResolveFolderPath_EmptyFolderName(t *testing.T) {
+	r := NewPathResolver([]FolderNode{
+		{ID: "f1", FolderName: "", Type: "NOTE", ParentID: nil},
+	})
+	got, err := r.ResolveFolderPath("f1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "NOTE/_unnamed" {
+		t.Errorf("got %q, want %q", got, "NOTE/_unnamed")
 	}
 }
 

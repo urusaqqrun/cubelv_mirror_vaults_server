@@ -270,6 +270,15 @@ func (h *alwaysFailHandler) HandleEvent(_ context.Context, _ SyncEvent) error {
 	return h.err
 }
 
+type lockedHandler struct {
+	calls int
+}
+
+func (h *lockedHandler) HandleEvent(_ context.Context, _ SyncEvent) error {
+	h.calls++
+	return ErrVaultLocked
+}
+
 func TestProcessPending_XClaim_DeliveryCounterIncrements(t *testing.T) {
 	_, rdb := setupTestRedis(t)
 	defer rdb.Close()
@@ -378,5 +387,66 @@ func TestProcessPending_DeadLetterAfterMaxRetry(t *testing.T) {
 
 	if !deadLettered {
 		t.Fatal("訊息未被 dead-letter 處理，delivery counter 可能未正確遞增")
+	}
+}
+
+func TestProcessPending_VaultLocked_DoesNotDeadLetter(t *testing.T) {
+	_, rdb := setupTestRedis(t)
+	defer rdb.Close()
+
+	handler := &lockedHandler{}
+	consumer := NewConsumer(rdb, handler, "test-1")
+	ctx := context.Background()
+	consumer.EnsureGroup(ctx)
+
+	rdb.XAdd(ctx, &redis.XAddArgs{
+		Stream: StreamName,
+		Values: map[string]interface{}{
+			"collection": "note",
+			"userId":     "user1",
+			"docId":      "n1",
+			"action":     "update",
+			"timestamp":  "1709000000000",
+		},
+	})
+
+	// 初次讀取讓訊息進入 PEL（delivery count = 1）
+	_, err := rdb.XReadGroup(ctx, &redis.XReadGroupArgs{
+		Group:    ConsumerGroup,
+		Consumer: "test-1",
+		Streams:  []string{StreamName, ">"},
+		Count:    1,
+		Block:    100 * time.Millisecond,
+	}).Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < MaxPendingRetry+5; i++ {
+		handled, runErr := consumer.processPending(ctx)
+		if runErr != nil {
+			t.Fatal(runErr)
+		}
+		if handled != 0 {
+			t.Fatalf("locked event should not be acked, handled=%d", handled)
+		}
+	}
+
+	pend, err := rdb.XPendingExt(ctx, &redis.XPendingExtArgs{
+		Stream:   StreamName,
+		Group:    ConsumerGroup,
+		Consumer: "test-1",
+		Start:    "-",
+		End:      "+",
+		Count:    10,
+	}).Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pend) != 1 {
+		t.Fatalf("expected 1 locked pending event, got %d", len(pend))
+	}
+	if pend[0].RetryCount != 1 {
+		t.Fatalf("locked event retry counter should stay 1, got %d", pend[0].RetryCount)
 	}
 }

@@ -1,6 +1,7 @@
 package mirror
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -21,6 +22,8 @@ type PathResolver struct {
 	tree  map[string]*FolderNode
 	cache map[string]string // folderID → 已解析的路徑
 }
+
+var errFolderNotFoundInTree = errors.New("folder not found in tree")
 
 func NewPathResolver(folders []FolderNode) *PathResolver {
 	r := &PathResolver{
@@ -58,6 +61,9 @@ func (r *PathResolver) ResolveFolderPath(folderID string) (string, error) {
 	parts, err := r.buildPathParts(folderID, make(map[string]bool))
 	r.mu.RUnlock()
 	if err != nil {
+		if errors.Is(err, errFolderNotFoundInTree) {
+			return "_unsorted", nil
+		}
 		return "", err
 	}
 
@@ -127,7 +133,7 @@ func (r *PathResolver) buildPathParts(folderID string, visited map[string]bool) 
 
 	node, ok := r.tree[folderID]
 	if !ok {
-		return nil, fmt.Errorf("folder %q not found in tree", folderID)
+		return nil, fmt.Errorf("%w: %q", errFolderNotFoundInTree, folderID)
 	}
 
 	name := sanitizeName(node.FolderName)
@@ -164,6 +170,9 @@ func resolveType(t string) string {
 
 // sanitizeName 將不安全的檔名字元替換為底線
 func sanitizeName(name string) string {
+	if name == "" {
+		return "_unnamed"
+	}
 	name = strings.ReplaceAll(name, "/", "_")
 	name = strings.ReplaceAll(name, "\\", "_")
 	name = strings.ReplaceAll(name, "\x00", "")

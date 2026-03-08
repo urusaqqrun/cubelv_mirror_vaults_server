@@ -2,6 +2,7 @@ package sync
 
 import (
 	"context"
+	"errors"
 	"log"
 	"strconv"
 	"strings"
@@ -96,6 +97,11 @@ func (c *Consumer) Start(ctx context.Context) error {
 			for _, msg := range stream.Messages {
 				event := parseEvent(msg.Values)
 				if err := c.handler.HandleEvent(ctx, event); err != nil {
+					if errors.Is(err, ErrVaultLocked) {
+						log.Printf("HandleEvent locked (id=%s), keep pending", msg.ID)
+						time.Sleep(200 * time.Millisecond)
+						continue
+					}
 					log.Printf("HandleEvent error (id=%s): %v", msg.ID, err)
 					continue
 				}
@@ -131,26 +137,9 @@ func (c *Consumer) processPending(ctx context.Context) (int, error) {
 
 	handled := 0
 	for _, p := range pending {
-		if p.RetryCount >= MaxPendingRetry {
-			log.Printf("[Dead-letter] 訊息 %s 重試 %d 次仍失敗，ACK 並丟棄", p.ID, p.RetryCount)
-			if err := c.rdb.XAck(ctx, StreamName, ConsumerGroup, p.ID).Err(); err != nil {
-				log.Printf("[Dead-letter] XAck error (id=%s): %v", p.ID, err)
-			}
-			handled++
-			continue
-		}
-
-		// 使用 XClaim 而非 XRangeN：XClaim 會遞增 delivery counter，
-		// 讓 RetryCount 正確累加，dead-letter 機制才能生效。
-		msgs, err := c.rdb.XClaim(ctx, &redis.XClaimArgs{
-			Stream:   StreamName,
-			Group:    ConsumerGroup,
-			Consumer: c.consumer,
-			MinIdle:  0,
-			Messages: []string{p.ID},
-		}).Result()
+		msgs, err := c.rdb.XRangeN(ctx, StreamName, p.ID, p.ID, 1).Result()
 		if err != nil {
-			log.Printf("XClaim error (id=%s): %v", p.ID, err)
+			log.Printf("XRangeN error (id=%s): %v", p.ID, err)
 			continue
 		}
 		if len(msgs) == 0 {
@@ -164,6 +153,29 @@ func (c *Consumer) processPending(ctx context.Context) (int, error) {
 
 		event := parseEvent(msgs[0].Values)
 		if err := c.handler.HandleEvent(ctx, event); err != nil {
+			if errors.Is(err, ErrVaultLocked) {
+				log.Printf("Handle pending event locked (id=%s), keep pending", p.ID)
+				time.Sleep(200 * time.Millisecond)
+				continue
+			}
+			// 非鎖定錯誤：若超過重試上限，dead-letter；否則用 XClaim 讓 RetryCount 增加。
+			if p.RetryCount >= MaxPendingRetry {
+				log.Printf("[Dead-letter] 訊息 %s 重試 %d 次仍失敗，ACK 並丟棄", p.ID, p.RetryCount)
+				if ackErr := c.rdb.XAck(ctx, StreamName, ConsumerGroup, p.ID).Err(); ackErr != nil {
+					log.Printf("[Dead-letter] XAck error (id=%s): %v", p.ID, ackErr)
+				}
+				handled++
+				continue
+			}
+			if _, claimErr := c.rdb.XClaim(ctx, &redis.XClaimArgs{
+				Stream:   StreamName,
+				Group:    ConsumerGroup,
+				Consumer: c.consumer,
+				MinIdle:  0,
+				Messages: []string{p.ID},
+			}).Result(); claimErr != nil {
+				log.Printf("XClaim error (id=%s): %v", p.ID, claimErr)
+			}
 			log.Printf("Handle pending event error (id=%s, retry=%d): %v", p.ID, p.RetryCount, err)
 			time.Sleep(time.Duration(PendingBackoffMs*(p.RetryCount+1)) * time.Millisecond)
 			continue

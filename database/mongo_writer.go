@@ -239,14 +239,10 @@ func (m *MongoReader) incrementUSNViaRedis(ctx context.Context, userID string) (
 
 func (m *MongoReader) getUserUSNFromMongo(ctx context.Context, userID string) (int, error) {
 	coll := m.db.Collection("User")
-	idPrimitive, err := primitive.ObjectIDFromHex(userID)
-	if err != nil {
-		return 0, err
-	}
 	var row struct {
 		Usn int `bson:"usn"`
 	}
-	err = coll.FindOne(ctx, bson.M{"_id": idPrimitive},
+	err := coll.FindOne(ctx, buildUserFilter(userID),
 		options.FindOne().SetProjection(bson.M{"usn": 1}),
 	).Decode(&row)
 	if err != nil {
@@ -257,13 +253,9 @@ func (m *MongoReader) getUserUSNFromMongo(ctx context.Context, userID string) (i
 
 func (m *MongoReader) incrementUSNViaMongo(ctx context.Context, userID string) (int, error) {
 	coll := m.db.Collection("User")
-	idPrimitive, err := primitive.ObjectIDFromHex(userID)
-	if err != nil {
-		return 0, err
-	}
 	after := options.After
 	res := coll.FindOneAndUpdate(ctx,
-		bson.M{"_id": idPrimitive},
+		buildUserFilter(userID),
 		bson.M{"$inc": bson.M{"usn": 1}},
 		&options.FindOneAndUpdateOptions{ReturnDocument: &after},
 	)
@@ -274,6 +266,17 @@ func (m *MongoReader) incrementUSNViaMongo(ctx context.Context, userID string) (
 		return 0, err
 	}
 	return row.Usn, nil
+}
+
+func buildUserFilter(userID string) bson.M {
+	orFilters := bson.A{
+		bson.M{"_id": userID},
+		bson.M{"memberID": userID},
+	}
+	if oid, err := primitive.ObjectIDFromHex(userID); err == nil {
+		orFilters = append(orFilters, bson.M{"_id": oid})
+	}
+	return bson.M{"$or": orFilters}
 }
 
 // ListAllNotes 回傳用戶所有 Note（全量匯出用）
@@ -287,6 +290,7 @@ func (m *MongoReader) ListAllNotes(ctx context.Context, userID string) ([]*model
 	for cur.Next(ctx) {
 		var n model.Note
 		if err := cur.Decode(&n); err != nil {
+			log.Printf("[ListAllNotes] decode error: %v", err)
 			continue
 		}
 		out = append(out, &n)
@@ -305,6 +309,7 @@ func (m *MongoReader) ListAllCards(ctx context.Context, userID string) ([]*model
 	for cur.Next(ctx) {
 		var c model.Card
 		if err := cur.Decode(&c); err != nil {
+			log.Printf("[ListAllCards] decode error: %v", err)
 			continue
 		}
 		out = append(out, &c)
@@ -323,6 +328,7 @@ func (m *MongoReader) ListAllCharts(ctx context.Context, userID string) ([]*mode
 	for cur.Next(ctx) {
 		var c model.Chart
 		if err := cur.Decode(&c); err != nil {
+			log.Printf("[ListAllCharts] decode error: %v", err)
 			continue
 		}
 		out = append(out, &c)

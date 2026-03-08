@@ -2,6 +2,8 @@ package mirror
 
 import (
 	"encoding/json"
+	"log"
+	"strings"
 
 	"github.com/urusaqqrun/vault-mirror-service/model"
 )
@@ -84,7 +86,7 @@ func ItemToFolderMeta(item *model.Item) FolderMeta {
 		ChartKind:       model.StrPtrField(f, "chartKind"),
 	}
 	decodeField(f, "indexes", &meta.Indexes)
-	decodeField(f, "isSummarizedNoteIds", &meta.IsSummarizedNoteIds)
+	meta.IsSummarizedNoteIds = decodeStringPtrSliceField(f, "isSummarizedNoteIds")
 	decodeField(f, "fields", &meta.Fields)
 	decodeField(f, "templateHistory", &meta.TemplateHistory)
 	decodeField(f, "sharers", &meta.Sharers)
@@ -157,7 +159,68 @@ func decodeField(fields map[string]interface{}, key string, out interface{}) {
 	}
 	raw, err := json.Marshal(v)
 	if err != nil {
+		log.Printf("[decodeField] marshal %s error: %v", key, err)
 		return
 	}
-	_ = json.Unmarshal(raw, out)
+	if err := json.Unmarshal(raw, out); err != nil {
+		log.Printf("[decodeField] unmarshal %s error: %v", key, err)
+	}
+}
+
+// decodeStringPtrSliceField 相容舊資料：支援 []string / []interface{} / string
+func decodeStringPtrSliceField(fields map[string]interface{}, key string) []*string {
+	v, ok := fields[key]
+	if !ok || v == nil {
+		return nil
+	}
+
+	toPtrSlice := func(items []string) []*string {
+		out := make([]*string, 0, len(items))
+		for _, s := range items {
+			if s == "" {
+				continue
+			}
+			value := s
+			out = append(out, &value)
+		}
+		return out
+	}
+
+	switch val := v.(type) {
+	case []string:
+		return toPtrSlice(val)
+	case []interface{}:
+		items := make([]string, 0, len(val))
+		for _, it := range val {
+			if s, ok := it.(string); ok {
+				items = append(items, s)
+			}
+		}
+		return toPtrSlice(items)
+	case string:
+		trimmed := strings.TrimSpace(val)
+		if trimmed == "" {
+			return nil
+		}
+		// 部分舊資料可能將陣列序列化為字串儲存
+		if strings.HasPrefix(trimmed, "[") {
+			var arr []string
+			if err := json.Unmarshal([]byte(trimmed), &arr); err == nil {
+				return toPtrSlice(arr)
+			}
+		}
+		return toPtrSlice([]string{trimmed})
+	default:
+		var arr []string
+		raw, err := json.Marshal(v)
+		if err != nil {
+			log.Printf("[decodeField] marshal %s error: %v", key, err)
+			return nil
+		}
+		if err := json.Unmarshal(raw, &arr); err != nil {
+			log.Printf("[decodeField] unmarshal %s error: %v", key, err)
+			return nil
+		}
+		return toPtrSlice(arr)
+	}
 }

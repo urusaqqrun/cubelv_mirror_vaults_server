@@ -164,6 +164,9 @@ func TestFolderToJSON_NoteType(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := string(data)
+	if !strings.Contains(s, `"id": "f1"`) {
+		t.Error("JSON 應輸出小寫 id 欄位")
+	}
 	if !strings.Contains(s, "工作筆記") {
 		t.Error("JSON 應包含 folderName")
 	}

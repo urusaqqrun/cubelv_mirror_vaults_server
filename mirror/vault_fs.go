@@ -34,10 +34,40 @@ func (r *RealVaultFS) abs(path string) string { return filepath.Join(r.Root, pat
 
 func (r *RealVaultFS) WriteFile(path string, content []byte) error {
 	abs := r.abs(path)
-	if err := os.MkdirAll(filepath.Dir(abs), 0755); err != nil {
+	dir := filepath.Dir(abs)
+	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}
-	return os.WriteFile(abs, content, 0644)
+	tmp, err := os.CreateTemp(dir, ".tmp-write-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := tmp.Write(content); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpPath, 0644); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, abs); err != nil {
+		return err
+	}
+	cleanup = false
+	return nil
 }
 
 func (r *RealVaultFS) ReadFile(path string) ([]byte, error) {
@@ -79,7 +109,10 @@ func (r *RealVaultFS) Stat(path string) (fs.FileInfo, error) {
 
 func (r *RealVaultFS) Walk(root string, fn filepath.WalkFunc) error {
 	return filepath.Walk(r.abs(root), func(path string, info fs.FileInfo, err error) error {
-		rel, _ := filepath.Rel(r.Root, path)
+		rel, relErr := filepath.Rel(r.Root, path)
+		if relErr != nil {
+			return fn(path, info, relErr)
+		}
 		return fn(rel, info, err)
 	})
 }
@@ -294,10 +327,17 @@ type memDirEntry struct {
 	isDir bool
 }
 
-func (e *memDirEntry) Name() string               { return e.name }
-func (e *memDirEntry) IsDir() bool                 { return e.isDir }
-func (e *memDirEntry) Type() fs.FileMode           { if e.isDir { return fs.ModeDir }; return 0 }
-func (e *memDirEntry) Info() (fs.FileInfo, error)   { return &memFileInfo{name: e.name, isDir: e.isDir}, nil }
+func (e *memDirEntry) Name() string { return e.name }
+func (e *memDirEntry) IsDir() bool  { return e.isDir }
+func (e *memDirEntry) Type() fs.FileMode {
+	if e.isDir {
+		return fs.ModeDir
+	}
+	return 0
+}
+func (e *memDirEntry) Info() (fs.FileInfo, error) {
+	return &memFileInfo{name: e.name, isDir: e.isDir}, nil
+}
 
 // memFileInfo implements fs.FileInfo for testing
 type memFileInfo struct {
@@ -306,9 +346,14 @@ type memFileInfo struct {
 	isDir bool
 }
 
-func (i *memFileInfo) Name() string      { return i.name }
-func (i *memFileInfo) Size() int64       { return i.size }
-func (i *memFileInfo) Mode() fs.FileMode { if i.isDir { return fs.ModeDir | 0755 }; return 0644 }
+func (i *memFileInfo) Name() string { return i.name }
+func (i *memFileInfo) Size() int64  { return i.size }
+func (i *memFileInfo) Mode() fs.FileMode {
+	if i.isDir {
+		return fs.ModeDir | 0755
+	}
+	return 0644
+}
 func (i *memFileInfo) ModTime() time.Time { return time.Now() }
-func (i *memFileInfo) IsDir() bool       { return i.isDir }
-func (i *memFileInfo) Sys() interface{}  { return nil }
+func (i *memFileInfo) IsDir() bool        { return i.isDir }
+func (i *memFileInfo) Sys() interface{}   { return nil }

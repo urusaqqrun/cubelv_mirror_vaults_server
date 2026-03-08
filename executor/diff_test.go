@@ -135,3 +135,27 @@ func TestComputeDiff_MultipleChanges(t *testing.T) {
 		t.Errorf("Created: got %d, want 1", len(diff.Created))
 	}
 }
+
+func TestComputeDiff_HashCollisionFallback(t *testing.T) {
+	now := time.Now()
+	before := map[string]FileSnapshot{
+		"NOTE/同內容/a.md": {Path: "NOTE/同內容/a.md", Hash: "same-hash", ModTime: now},
+		"NOTE/同內容/b.md": {Path: "NOTE/同內容/b.md", Hash: "same-hash", ModTime: now},
+		"NOTE/同內容/c.md": {Path: "NOTE/同內容/c.md", Hash: "same-hash", ModTime: now},
+	}
+	after := map[string]FileSnapshot{
+		"NOTE/新位置/x.md": {Path: "NOTE/新位置/x.md", Hash: "same-hash", ModTime: now},
+		"NOTE/新位置/y.md": {Path: "NOTE/新位置/y.md", Hash: "same-hash", ModTime: now},
+	}
+
+	diff := ComputeDiff(before, after)
+	if len(diff.Moved) != 1 {
+		t.Fatalf("Moved: got %d, want 1", len(diff.Moved))
+	}
+	if len(diff.Created) != 1 {
+		t.Fatalf("Created: got %d, want 1", len(diff.Created))
+	}
+	if len(diff.Deleted) != 2 {
+		t.Fatalf("Deleted: got %d, want 2", len(diff.Deleted))
+	}
+}

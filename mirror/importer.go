@@ -3,6 +3,7 @@ package mirror
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"path/filepath"
 	"strings"
 )
@@ -52,6 +53,7 @@ func (imp *Importer) ProcessDiff(userId string, created, modified, deleted []str
 	for _, path := range created {
 		entry, err := imp.parseFile(userId, path, ImportActionCreate)
 		if err != nil {
+			log.Printf("[Importer] skip created %s: %v", path, err)
 			continue
 		}
 		entries = append(entries, entry)
@@ -60,6 +62,7 @@ func (imp *Importer) ProcessDiff(userId string, created, modified, deleted []str
 	for _, path := range modified {
 		entry, err := imp.parseFile(userId, path, ImportActionUpdate)
 		if err != nil {
+			log.Printf("[Importer] skip modified %s: %v", path, err)
 			continue
 		}
 		entries = append(entries, entry)
@@ -83,6 +86,7 @@ func (imp *Importer) ProcessDiff(userId string, created, modified, deleted []str
 	for _, m := range moved {
 		entry, err := imp.parseFile(userId, m.NewPath, ImportActionMove)
 		if err != nil {
+			log.Printf("[Importer] skip moved %s -> %s: %v", m.OldPath, m.NewPath, err)
 			continue
 		}
 		entry.OldPath = m.OldPath
@@ -110,8 +114,8 @@ func (imp *Importer) parseFile(userId, path string, action ImportAction) (Import
 
 	switch itemType {
 	case "FOLDER":
-		var meta FolderMeta
-		if err := json.Unmarshal(data, &meta); err != nil {
+		meta, err := JSONToFolder(data)
+		if err != nil {
 			return entry, fmt.Errorf("parse folder json: %w", err)
 		}
 		entry.FolderMeta = &meta

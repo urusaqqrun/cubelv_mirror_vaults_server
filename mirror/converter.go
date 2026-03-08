@@ -34,7 +34,7 @@ type NoteMeta struct {
 
 // FolderMeta _folder.json 元資料（完整映射 model.Folder 所有欄位）
 type FolderMeta struct {
-	ID         string  `json:"ID"`
+	ID         string  `json:"id"`
 	MemberID   string  `json:"memberID"`
 	FolderName string  `json:"folderName"`
 	Type       *string `json:"type,omitempty"`
@@ -57,15 +57,15 @@ type FolderMeta struct {
 	IsSummarizedNoteIds []*string   `json:"isSummarizedNoteIds,omitempty"`
 
 	// CARD 專用
-	Fields          []CardFieldMeta          `json:"fields,omitempty"`
-	TemplateHTML    *string                  `json:"templateHtml,omitempty"`
-	TemplateCSS     *string                  `json:"templateCss,omitempty"`
-	UIPrompt        *string                  `json:"uiPrompt,omitempty"`
-	TemplateHistory []TemplateHistoryMeta    `json:"templateHistory,omitempty"`
-	IsShared        bool                     `json:"isShared,omitempty"`
-	Searchable      bool                     `json:"searchable,omitempty"`
-	AllowContribute bool                     `json:"allowContribute,omitempty"`
-	Sharers         []SharerMeta             `json:"sharers,omitempty"`
+	Fields          []CardFieldMeta       `json:"fields,omitempty"`
+	TemplateHTML    *string               `json:"templateHtml,omitempty"`
+	TemplateCSS     *string               `json:"templateCss,omitempty"`
+	UIPrompt        *string               `json:"uiPrompt,omitempty"`
+	TemplateHistory []TemplateHistoryMeta `json:"templateHistory,omitempty"`
+	IsShared        bool                  `json:"isShared,omitempty"`
+	Searchable      bool                  `json:"searchable,omitempty"`
+	AllowContribute bool                  `json:"allowContribute,omitempty"`
+	Sharers         []SharerMeta          `json:"sharers,omitempty"`
 
 	// CHART 專用
 	ChartKind *string `json:"chartKind,omitempty"`
@@ -168,8 +168,19 @@ func FolderToJSON(meta FolderMeta) ([]byte, error) {
 // JSONToFolder 從 _folder.json 反序列化
 func JSONToFolder(data []byte) (FolderMeta, error) {
 	var meta FolderMeta
-	err := json.Unmarshal(data, &meta)
-	return meta, err
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return meta, err
+	}
+	// 向後相容：舊版 _folder.json 使用大寫 "ID"
+	if meta.ID == "" {
+		var legacy struct {
+			ID string `json:"ID"`
+		}
+		if err := json.Unmarshal(data, &legacy); err == nil && legacy.ID != "" {
+			meta.ID = legacy.ID
+		}
+	}
+	return meta, nil
 }
 
 // CardToJSON 將 CardMeta 序列化為 JSON

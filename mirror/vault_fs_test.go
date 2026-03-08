@@ -1,6 +1,10 @@
 package mirror
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestMemoryVaultFS_WriteAndRead(t *testing.T) {
 	fs := NewMemoryVaultFS()
@@ -115,5 +119,25 @@ func TestMemoryVaultFS_Stat(t *testing.T) {
 	}
 	if info.Size() != 11 {
 		t.Errorf("size: got %d, want 11", info.Size())
+	}
+}
+
+func TestRealVaultFS_WriteFile_Overwrite(t *testing.T) {
+	root := t.TempDir()
+	fs := &RealVaultFS{Root: root}
+
+	if err := fs.WriteFile("NOTE/a.md", []byte("v1")); err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.WriteFile("NOTE/a.md", []byte("v2")); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(root, "NOTE", "a.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "v2" {
+		t.Fatalf("got %q, want %q", string(data), "v2")
 	}
 }

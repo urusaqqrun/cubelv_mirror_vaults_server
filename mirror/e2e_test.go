@@ -193,3 +193,183 @@ func TestE2E_BulkSync_100Folders_500Notes(t *testing.T) {
 		t.Errorf("folder name: got %q, want %q", meta.FolderName, "Folder_50")
 	}
 }
+
+func TestE2E_DeepNestedFolderMove(t *testing.T) {
+	fs := NewMemoryVaultFS()
+	resolver := NewPathResolver([]FolderNode{
+		{ID: "f-root", FolderName: "ROOT", Type: "NOTE", ParentID: nil},
+		{ID: "f-a", FolderName: "A", Type: "NOTE", ParentID: strPtr("f-root")},
+		{ID: "f-b", FolderName: "B", Type: "NOTE", ParentID: strPtr("f-a")},
+		{ID: "f-c", FolderName: "C", Type: "NOTE", ParentID: strPtr("f-b")},
+		{ID: "f-todo", FolderName: "待辦", Type: "TODO", ParentID: nil},
+	})
+	exporter := NewExporter(fs, resolver)
+
+	if err := exporter.ExportNote("user1", NoteMeta{
+		ID: "n1", ParentID: "f-c", Title: "深層筆記", USN: 1,
+		CreatedAt: "1700000000000", UpdatedAt: "1709000000000",
+	}, "<p>內容</p>"); err != nil {
+		t.Fatal(err)
+	}
+
+	moveToA := `---
+id: n1
+parentID: f-a
+title: 深層筆記
+usn: 1
+---
+
+內容
+`
+	if err := fs.WriteFile("user1/NOTE/ROOT/A/深層筆記.md", []byte(moveToA)); err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.Remove("user1/NOTE/ROOT/A/B/C/深層筆記.md"); err != nil {
+		t.Fatal(err)
+	}
+
+	importer := NewImporter(fs)
+	entries, err := importer.ProcessDiff("user1", nil, nil, nil, []MovedFileEntry{
+		{OldPath: "NOTE/ROOT/A/B/C/深層筆記.md", NewPath: "NOTE/ROOT/A/深層筆記.md"},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("got %d entries, want 1", len(entries))
+	}
+	if entries[0].Action != ImportActionMove {
+		t.Fatalf("action: got %q, want %q", entries[0].Action, ImportActionMove)
+	}
+	if entries[0].NoteMeta == nil || entries[0].NoteMeta.ParentID != "f-a" {
+		t.Fatalf("move to A should set parentID=f-a, got %+v", entries[0].NoteMeta)
+	}
+
+	moveToTodo := `---
+id: n1
+parentID: f-todo
+title: 深層筆記
+usn: 1
+---
+
+內容
+`
+	if err := fs.WriteFile("user1/TODO/待辦/深層筆記.md", []byte(moveToTodo)); err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.Remove("user1/NOTE/ROOT/A/深層筆記.md"); err != nil {
+		t.Fatal(err)
+	}
+	entries, err = importer.ProcessDiff("user1", nil, nil, nil, []MovedFileEntry{
+		{OldPath: "NOTE/ROOT/A/深層筆記.md", NewPath: "TODO/待辦/深層筆記.md"},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("got %d entries, want 1", len(entries))
+	}
+	if entries[0].Action != ImportActionMove {
+		t.Fatalf("action: got %q, want %q", entries[0].Action, ImportActionMove)
+	}
+	if entries[0].NoteMeta == nil || entries[0].NoteMeta.ParentID != "f-todo" {
+		t.Fatalf("move to TODO should set parentID=f-todo, got %+v", entries[0].NoteMeta)
+	}
+}
+
+func TestE2E_SpecialCharacters_InNames(t *testing.T) {
+	fs := NewMemoryVaultFS()
+	resolver := NewPathResolver([]FolderNode{
+		{ID: "f1", FolderName: "工作筆記", Type: "NOTE", ParentID: nil},
+		{ID: "f2", FolderName: "2026/03/08 meeting", Type: "NOTE", ParentID: nil},
+		{ID: "f3", FolderName: "", Type: "NOTE", ParentID: nil},
+	})
+	exporter := NewExporter(fs, resolver)
+	noteType := "NOTE"
+	if err := exporter.ExportFolder("user1", FolderMeta{ID: "f1", MemberID: "user1", FolderName: "工作筆記", Type: &noteType}); err != nil {
+		t.Fatal(err)
+	}
+	if err := exporter.ExportFolder("user1", FolderMeta{ID: "f2", MemberID: "user1", FolderName: "2026/03/08 meeting", Type: &noteType}); err != nil {
+		t.Fatal(err)
+	}
+	if err := exporter.ExportFolder("user1", FolderMeta{ID: "f3", MemberID: "user1", FolderName: "", Type: &noteType}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := exporter.ExportNote("user1", NoteMeta{ID: "n-cn", ParentID: "f1", Title: "工作筆記", USN: 1}, "<p>中文內容</p>"); err != nil {
+		t.Fatal(err)
+	}
+	if err := exporter.ExportNote("user1", NoteMeta{ID: "n-emoji", ParentID: "f1", Title: "📝 Daily Log", USN: 1}, "<p>emoji</p>"); err != nil {
+		t.Fatal(err)
+	}
+	if err := exporter.ExportNote("user1", NoteMeta{ID: "n-slash", ParentID: "f2", Title: "2026/03/08 meeting", USN: 1}, "<p>slash</p>"); err != nil {
+		t.Fatal(err)
+	}
+	if err := exporter.ExportNote("user1", NoteMeta{ID: "n-null", ParentID: "f2", Title: "note\x00bad", USN: 1}, "<p>null</p>"); err != nil {
+		t.Fatal(err)
+	}
+	if err := exporter.ExportNote("user1", NoteMeta{ID: "n-empty", ParentID: "f3", Title: "", USN: 1}, "<p>empty</p>"); err != nil {
+		t.Fatal(err)
+	}
+
+	if !fs.Exists("user1/NOTE/工作筆記/工作筆記.md") {
+		t.Fatal("expected chinese note path to exist")
+	}
+	if !fs.Exists("user1/NOTE/工作筆記/📝 Daily Log.md") {
+		t.Fatal("expected emoji note path to exist")
+	}
+	if !fs.Exists("user1/NOTE/2026_03_08 meeting/2026_03_08 meeting.md") {
+		t.Fatal("expected slash-sanitized note path to exist")
+	}
+	if !fs.Exists("user1/NOTE/2026_03_08 meeting/notebad.md") {
+		t.Fatal("expected null-byte-sanitized note path to exist")
+	}
+	if !fs.Exists("user1/NOTE/_unnamed/_unnamed.md") {
+		t.Fatal("expected empty-name fallback path to exist")
+	}
+}
+
+func TestE2E_FolderRename_CascadingPaths(t *testing.T) {
+	fs := NewMemoryVaultFS()
+	resolver := NewPathResolver([]FolderNode{
+		{ID: "f1", FolderName: "工作", Type: "NOTE", ParentID: nil},
+	})
+	exporter := NewExporter(fs, resolver)
+	noteType := "NOTE"
+	if err := exporter.ExportFolder("user1", FolderMeta{ID: "f1", MemberID: "user1", FolderName: "工作", Type: &noteType}); err != nil {
+		t.Fatal(err)
+	}
+	notes := []NoteMeta{
+		{ID: "n1", ParentID: "f1", Title: "筆記一", USN: 1},
+		{ID: "n2", ParentID: "f1", Title: "筆記二", USN: 1},
+		{ID: "n3", ParentID: "f1", Title: "筆記三", USN: 1},
+	}
+	for _, n := range notes {
+		if err := exporter.ExportNote("user1", n, "<p>body</p>"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !fs.Exists("user1/NOTE/工作/筆記一.md") {
+		t.Fatal("old folder note should exist before rename")
+	}
+
+	resolver.UpdateFolder(FolderNode{ID: "f1", FolderName: "工作區", Type: "NOTE", ParentID: nil})
+	if err := exporter.ExportFolder("user1", FolderMeta{ID: "f1", MemberID: "user1", FolderName: "工作區", Type: &noteType}); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range notes {
+		if err := exporter.ExportNote("user1", n, "<p>body updated</p>"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if fs.Exists("user1/NOTE/工作") {
+		t.Fatal("old folder should be removed after rename")
+	}
+	if !fs.Exists("user1/NOTE/工作區/_folder.json") {
+		t.Fatal("new folder metadata should exist")
+	}
+	if !fs.Exists("user1/NOTE/工作區/筆記一.md") || !fs.Exists("user1/NOTE/工作區/筆記二.md") || !fs.Exists("user1/NOTE/工作區/筆記三.md") {
+		t.Fatal("all notes should exist under renamed folder")
+	}
+}
