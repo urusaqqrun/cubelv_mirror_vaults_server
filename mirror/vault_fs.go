@@ -1,6 +1,7 @@
 package mirror
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -30,10 +31,30 @@ type RealVaultFS struct {
 	Root string
 }
 
-func (r *RealVaultFS) abs(path string) string { return filepath.Join(r.Root, path) }
+func (r *RealVaultFS) abs(path string) (string, error) {
+	if path == "" || path == "." {
+		return r.Root, nil
+	}
+	if filepath.IsAbs(path) {
+		return "", errors.New("absolute path is not allowed")
+	}
+	clean := filepath.Clean(path)
+	abs := filepath.Join(r.Root, clean)
+	rel, err := filepath.Rel(r.Root, abs)
+	if err != nil {
+		return "", err
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("path traversal detected: %s", path)
+	}
+	return abs, nil
+}
 
 func (r *RealVaultFS) WriteFile(path string, content []byte) error {
-	abs := r.abs(path)
+	abs, err := r.abs(path)
+	if err != nil {
+		return err
+	}
 	dir := filepath.Dir(abs)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
@@ -71,44 +92,83 @@ func (r *RealVaultFS) WriteFile(path string, content []byte) error {
 }
 
 func (r *RealVaultFS) ReadFile(path string) ([]byte, error) {
-	return os.ReadFile(r.abs(path))
+	abs, err := r.abs(path)
+	if err != nil {
+		return nil, err
+	}
+	return os.ReadFile(abs)
 }
 
 func (r *RealVaultFS) MkdirAll(path string) error {
-	return os.MkdirAll(r.abs(path), 0755)
+	abs, err := r.abs(path)
+	if err != nil {
+		return err
+	}
+	return os.MkdirAll(abs, 0755)
 }
 
 func (r *RealVaultFS) Remove(path string) error {
-	return os.Remove(r.abs(path))
+	abs, err := r.abs(path)
+	if err != nil {
+		return err
+	}
+	return os.Remove(abs)
 }
 
 func (r *RealVaultFS) RemoveAll(path string) error {
-	return os.RemoveAll(r.abs(path))
+	abs, err := r.abs(path)
+	if err != nil {
+		return err
+	}
+	return os.RemoveAll(abs)
 }
 
 func (r *RealVaultFS) Rename(oldPath, newPath string) error {
-	newAbs := r.abs(newPath)
+	oldAbs, err := r.abs(oldPath)
+	if err != nil {
+		return err
+	}
+	newAbs, err := r.abs(newPath)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(newAbs), 0755); err != nil {
 		return err
 	}
-	return os.Rename(r.abs(oldPath), newAbs)
+	return os.Rename(oldAbs, newAbs)
 }
 
 func (r *RealVaultFS) Exists(path string) bool {
-	_, err := os.Stat(r.abs(path))
+	abs, err := r.abs(path)
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(abs)
 	return err == nil
 }
 
 func (r *RealVaultFS) ListDir(path string) ([]fs.DirEntry, error) {
-	return os.ReadDir(r.abs(path))
+	abs, err := r.abs(path)
+	if err != nil {
+		return nil, err
+	}
+	return os.ReadDir(abs)
 }
 
 func (r *RealVaultFS) Stat(path string) (fs.FileInfo, error) {
-	return os.Stat(r.abs(path))
+	abs, err := r.abs(path)
+	if err != nil {
+		return nil, err
+	}
+	return os.Stat(abs)
 }
 
 func (r *RealVaultFS) Walk(root string, fn filepath.WalkFunc) error {
-	return filepath.Walk(r.abs(root), func(path string, info fs.FileInfo, err error) error {
+	absRoot, err := r.abs(root)
+	if err != nil {
+		return err
+	}
+	return filepath.Walk(absRoot, func(path string, info fs.FileInfo, err error) error {
 		rel, relErr := filepath.Rel(r.Root, path)
 		if relErr != nil {
 			return fn(path, info, relErr)

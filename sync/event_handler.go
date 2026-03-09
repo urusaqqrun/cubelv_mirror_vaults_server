@@ -17,7 +17,6 @@ import (
 )
 
 var (
-	errFound      = errors.New("found")
 	ErrVaultLocked = errors.New("user vault is locked by active AI task")
 )
 
@@ -44,7 +43,18 @@ type resolverEntry struct {
 	expiresAt time.Time
 }
 
+type docPathEntry struct {
+	path     string
+	isFolder bool
+}
+
+type docPathIndexEntry struct {
+	entries   map[string]docPathEntry
+	expiresAt time.Time
+}
+
 const resolverCacheTTL = 30 * time.Second
+const docPathIndexTTL = 30 * time.Second
 
 // SyncEventHandler 將同步事件轉為 Vault 匯出動作
 type SyncEventHandler struct {
@@ -52,12 +62,18 @@ type SyncEventHandler struct {
 	reader DataReader
 	locker VaultLocker // nil 時不檢查鎖定
 
-	mu             sync.Mutex
-	resolverCache  map[string]*resolverEntry
+	mu            sync.Mutex
+	resolverCache map[string]*resolverEntry
+	docPathIndex  map[string]*docPathIndexEntry
 }
 
 func NewSyncEventHandler(fs mirror.VaultFS, reader DataReader) *SyncEventHandler {
-	return &SyncEventHandler{fs: fs, reader: reader, resolverCache: make(map[string]*resolverEntry)}
+	return &SyncEventHandler{
+		fs:            fs,
+		reader:        reader,
+		resolverCache: make(map[string]*resolverEntry),
+		docPathIndex:  make(map[string]*docPathIndexEntry),
+	}
 }
 
 // SetLocker 設定 VaultLocker（在 main.go 組裝時呼叫）
@@ -79,6 +95,7 @@ func (h *SyncEventHandler) HandleEvent(ctx context.Context, event SyncEvent) err
 
 	if col == "folder" {
 		h.InvalidateResolver(event.UserID)
+		h.InvalidateDocPathIndex(event.UserID)
 	}
 
 	switch strings.ToLower(event.Action) {
@@ -110,6 +127,7 @@ func (h *SyncEventHandler) handleItemEvent(ctx context.Context, event SyncEvent)
 	// 資料夾類型變更時清除 PathResolver 快取
 	if model.IsFolder(item.Type) {
 		h.InvalidateResolver(event.UserID)
+		h.InvalidateDocPathIndex(event.UserID)
 	}
 
 	resolver, err := h.getResolver(ctx, event.UserID)
@@ -121,74 +139,61 @@ func (h *SyncEventHandler) handleItemEvent(ctx context.Context, event SyncEvent)
 	switch {
 	case model.IsFolder(item.Type):
 		meta := mirror.ItemToFolderMeta(item)
-		return exporter.ExportFolder(event.UserID, meta)
+		if err := exporter.ExportFolder(event.UserID, meta); err != nil {
+			return err
+		}
+		if p, err := resolver.ResolveFolderPath(meta.ID); err == nil {
+			h.setDocPath(event.UserID, meta.ID, filepath.Join(event.UserID, p), true)
+		}
+		return nil
 	case item.Type == model.ItemTypeNote || item.Type == model.ItemTypeTodo:
 		meta, content := mirror.ItemToNoteMeta(item)
-		return exporter.ExportNote(event.UserID, meta, content)
+		if err := exporter.ExportNote(event.UserID, meta, content); err != nil {
+			return err
+		}
+		if p, err := resolver.ResolveNotePath(meta.Title, meta.ParentID); err == nil {
+			h.setDocPath(event.UserID, meta.ID, filepath.Join(event.UserID, p), false)
+		}
+		return nil
 	case item.Type == model.ItemTypeCard:
 		meta := mirror.ItemToCardMeta(item)
-		return exporter.ExportCard(event.UserID, meta)
+		if err := exporter.ExportCard(event.UserID, meta); err != nil {
+			return err
+		}
+		if p, err := resolver.ResolveCardPath(meta.Name, meta.ParentID); err == nil {
+			h.setDocPath(event.UserID, meta.ID, filepath.Join(event.UserID, p), false)
+		}
+		return nil
 	case item.Type == model.ItemTypeChart:
 		meta := mirror.ItemToChartMeta(item)
-		return exporter.ExportChart(event.UserID, meta)
+		if err := exporter.ExportChart(event.UserID, meta); err != nil {
+			return err
+		}
+		if p, err := resolver.ResolveChartPath(meta.Name, meta.ParentID); err == nil {
+			h.setDocPath(event.UserID, meta.ID, filepath.Join(event.UserID, p), false)
+		}
+		return nil
 	default:
 		log.Printf("[handleItemEvent] unknown itemType %q for %s", item.Type, event.DocID)
 		return nil
 	}
 }
 
-// deleteItemByDocID 刪除 item 對應的 EFS 檔案（不知道 itemType，需 walk 搜尋）
+// deleteItemByDocID 刪除 item 對應的 EFS 檔案（先查索引，找不到才全量掃描）
 func (h *SyncEventHandler) deleteItemByDocID(ctx context.Context, userID, docID string) error {
-	root := userID
-	var target string
-	var isFolder bool
-
-	walkErr := h.fs.Walk(root, func(path string, info fs.FileInfo, err error) error {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if err != nil || info == nil || info.IsDir() {
-			return nil
-		}
-		data, rErr := h.fs.ReadFile(path)
-		if rErr != nil {
-			return nil
-		}
-		if strings.HasSuffix(path, "_folder.json") {
-			meta, jErr := mirror.JSONToFolder(data)
-			if jErr == nil && meta.ID == docID {
-				target = filepath.Dir(path)
-				isFolder = true
-				return errFound
-			}
-		} else if strings.HasSuffix(path, ".md") {
-			meta, _, pErr := mirror.MarkdownToNote(string(data))
-			if pErr == nil && meta.ID == docID {
-				target = path
-				return errFound
-			}
-		} else if strings.HasSuffix(path, ".json") {
-			var card map[string]any
-			if jErr := json.Unmarshal(data, &card); jErr == nil {
-				if id, ok := card["id"].(string); ok && id == docID {
-					target = path
-					return errFound
-				}
-			}
-		}
-		return nil
-	})
-
-	if walkErr != nil && !errors.Is(walkErr, errFound) {
-		return walkErr
+	target, isFolder, err := h.findPathByDocID(ctx, userID, docID)
+	if err != nil {
+		return err
 	}
 	if target == "" {
 		return nil
 	}
 	if isFolder {
 		h.InvalidateResolver(userID)
+		h.removeDocPath(userID, docID)
 		return h.fs.RemoveAll(target)
 	}
+	h.removeDocPath(userID, docID)
 	return h.fs.Remove(target)
 }
 
@@ -205,103 +210,71 @@ func (h *SyncEventHandler) exportByDocID(ctx context.Context, userID, collection
 		if err != nil || f == nil {
 			return err
 		}
-		return exporter.ExportFolder(userID, toFolderMeta(f))
+		meta := toFolderMeta(f)
+		if err := exporter.ExportFolder(userID, meta); err != nil {
+			return err
+		}
+		if p, err := resolver.ResolveFolderPath(meta.ID); err == nil {
+			h.setDocPath(userID, meta.ID, filepath.Join(userID, p), true)
+		}
+		return nil
 	case "note":
 		n, err := h.reader.GetNote(ctx, userID, docID)
 		if err != nil || n == nil {
 			return err
 		}
-		return exporter.ExportNote(userID, toNoteMeta(n), n.GetContent())
+		meta := toNoteMeta(n)
+		if err := exporter.ExportNote(userID, meta, n.GetContent()); err != nil {
+			return err
+		}
+		if p, err := resolver.ResolveNotePath(meta.Title, meta.ParentID); err == nil {
+			h.setDocPath(userID, meta.ID, filepath.Join(userID, p), false)
+		}
+		return nil
 	case "card":
 		c, err := h.reader.GetCard(ctx, userID, docID)
 		if err != nil || c == nil {
 			return err
 		}
-		return exporter.ExportCard(userID, toCardMeta(c))
+		meta := toCardMeta(c)
+		if err := exporter.ExportCard(userID, meta); err != nil {
+			return err
+		}
+		if p, err := resolver.ResolveCardPath(meta.Name, meta.ParentID); err == nil {
+			h.setDocPath(userID, meta.ID, filepath.Join(userID, p), false)
+		}
+		return nil
 	case "chart":
 		c, err := h.reader.GetChart(ctx, userID, docID)
 		if err != nil || c == nil {
 			return err
 		}
-		return exporter.ExportChart(userID, toChartMeta(c))
+		meta := toChartMeta(c)
+		if err := exporter.ExportChart(userID, meta); err != nil {
+			return err
+		}
+		if p, err := resolver.ResolveChartPath(meta.Name, meta.ParentID); err == nil {
+			h.setDocPath(userID, meta.ID, filepath.Join(userID, p), false)
+		}
+		return nil
 	default:
 		return nil
 	}
 }
 
 func (h *SyncEventHandler) deleteByDocID(ctx context.Context, userID, collection, docID string) error {
-	root := userID
-	var target string
-	var isFolder bool
-
-	walkErr := h.fs.Walk(root, func(path string, info fs.FileInfo, err error) error {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if err != nil || info == nil || info.IsDir() {
-			return nil
-		}
-
-		data, rErr := h.fs.ReadFile(path)
-		if rErr != nil {
-			return nil
-		}
-
-		switch strings.ToLower(collection) {
-		case "note":
-			if !strings.HasSuffix(path, ".md") {
-				return nil
-			}
-			meta, _, parseErr := mirror.MarkdownToNote(string(data))
-			if parseErr != nil {
-				log.Printf("[deleteByDocID] parse md error (%s): %v", path, parseErr)
-				return nil
-			}
-			if meta.ID == docID {
-				target = path
-				return errFound
-			}
-		case "folder":
-			if !strings.HasSuffix(path, "_folder.json") {
-				return nil
-			}
-			meta, jErr := mirror.JSONToFolder(data)
-			if jErr != nil {
-				log.Printf("[deleteByDocID] parse folder json error (%s): %v", path, jErr)
-				return nil
-			}
-			if meta.ID == docID {
-				target = filepath.Dir(path)
-				isFolder = true
-				return errFound
-			}
-		case "card", "chart":
-			if !strings.HasSuffix(path, ".json") || strings.HasSuffix(path, "_folder.json") {
-				return nil
-			}
-			var card map[string]any
-			if uErr := json.Unmarshal(data, &card); uErr != nil {
-				log.Printf("[deleteByDocID] parse json error (%s): %v", path, uErr)
-				return nil
-			}
-			if id, ok := card["id"].(string); ok && id == docID {
-				target = path
-				return errFound
-			}
-		}
-		return nil
-	})
-
-	if walkErr != nil && !errors.Is(walkErr, errFound) {
-		return walkErr
+	target, isFolder, err := h.findPathByDocID(ctx, userID, docID)
+	if err != nil {
+		return err
 	}
-
 	if target == "" {
 		return nil
 	}
 	if isFolder {
+		h.removeDocPath(userID, docID)
 		return h.fs.RemoveAll(target)
 	}
+	h.removeDocPath(userID, docID)
 	return h.fs.Remove(target)
 }
 
@@ -333,6 +306,116 @@ func (h *SyncEventHandler) InvalidateResolver(userID string) {
 	h.mu.Lock()
 	delete(h.resolverCache, userID)
 	h.mu.Unlock()
+}
+
+// InvalidateDocPathIndex 清除指定用戶 docID->path 索引。
+func (h *SyncEventHandler) InvalidateDocPathIndex(userID string) {
+	h.mu.Lock()
+	delete(h.docPathIndex, userID)
+	h.mu.Unlock()
+}
+
+func (h *SyncEventHandler) setDocPath(userID, docID, path string, isFolder bool) {
+	if userID == "" || docID == "" || path == "" {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	entry, ok := h.docPathIndex[userID]
+	if !ok || time.Now().After(entry.expiresAt) {
+		entry = &docPathIndexEntry{
+			entries:   make(map[string]docPathEntry),
+			expiresAt: time.Now().Add(docPathIndexTTL),
+		}
+		h.docPathIndex[userID] = entry
+	}
+	entry.entries[docID] = docPathEntry{path: path, isFolder: isFolder}
+}
+
+func (h *SyncEventHandler) removeDocPath(userID, docID string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if entry, ok := h.docPathIndex[userID]; ok {
+		delete(entry.entries, docID)
+	}
+}
+
+func (h *SyncEventHandler) lookupDocPath(userID, docID string) (string, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	entry, ok := h.docPathIndex[userID]
+	if !ok {
+		return "", false
+	}
+	if time.Now().After(entry.expiresAt) {
+		delete(h.docPathIndex, userID)
+		return "", false
+	}
+	if p, ok := entry.entries[docID]; ok {
+		return p.path, p.isFolder
+	}
+	return "", false
+}
+
+func (h *SyncEventHandler) rebuildDocPathIndex(ctx context.Context, userID string) error {
+	next := make(map[string]docPathEntry)
+	root := userID
+	walkErr := h.fs.Walk(root, func(path string, info fs.FileInfo, err error) error {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err != nil || info == nil || info.IsDir() {
+			return nil
+		}
+		data, rErr := h.fs.ReadFile(path)
+		if rErr != nil {
+			return nil
+		}
+		if strings.HasSuffix(path, "_folder.json") {
+			meta, jErr := mirror.JSONToFolder(data)
+			if jErr == nil && meta.ID != "" {
+				next[meta.ID] = docPathEntry{path: filepath.Dir(path), isFolder: true}
+			}
+			return nil
+		}
+		if strings.HasSuffix(path, ".md") {
+			meta, _, pErr := mirror.MarkdownToNote(string(data))
+			if pErr == nil && meta.ID != "" {
+				next[meta.ID] = docPathEntry{path: path, isFolder: false}
+			}
+			return nil
+		}
+		if strings.HasSuffix(path, ".json") {
+			var card map[string]any
+			if jErr := json.Unmarshal(data, &card); jErr == nil {
+				if id, ok := card["id"].(string); ok && id != "" {
+					next[id] = docPathEntry{path: path, isFolder: false}
+				}
+			}
+		}
+		return nil
+	})
+	if walkErr != nil {
+		return walkErr
+	}
+	h.mu.Lock()
+	h.docPathIndex[userID] = &docPathIndexEntry{
+		entries:   next,
+		expiresAt: time.Now().Add(docPathIndexTTL),
+	}
+	h.mu.Unlock()
+	return nil
+}
+
+func (h *SyncEventHandler) findPathByDocID(ctx context.Context, userID, docID string) (string, bool, error) {
+	if p, isFolder := h.lookupDocPath(userID, docID); p != "" {
+		return p, isFolder, nil
+	}
+	if err := h.rebuildDocPathIndex(ctx, userID); err != nil {
+		return "", false, err
+	}
+	p, isFolder := h.lookupDocPath(userID, docID)
+	return p, isFolder, nil
 }
 
 func buildPathResolverFromItems(items []*model.Item) *mirror.PathResolver {

@@ -58,8 +58,12 @@ func main() {
 		cfg.VaultRoot,
 	)
 
-	// Vault Lock
-	vaultLock := executor.NewVaultLock()
+	// Vault Lock（優先使用 Redis 分散式鎖，失敗時退回本機鎖）
+	var vaultLock executor.VaultLocker = executor.NewVaultLock()
+	if rdb != nil {
+		lockTTL := time.Duration(cfg.TaskTimeoutMinutes+5) * time.Minute
+		vaultLock = executor.NewRedisVaultLock(rdb, lockTTL)
+	}
 
 	// Task executor（整合 Claude CLI + VaultFS + Vault Lock + MongoDB 回寫 + 衝突判定 + USN 遞增）
 	var dataWriter executor.DataWriter
@@ -198,7 +202,7 @@ type latestUSNReader interface {
 // fullTaskExecutor 整合所有執行元件
 type fullTaskExecutor struct {
 	claudeExec   *executor.ClaudeExecutor
-	vaultLock    *executor.VaultLock
+	vaultLock    executor.VaultLocker
 	vaultFS      mirror.VaultFS
 	vaultRoot    string
 	writer       executor.DataWriter

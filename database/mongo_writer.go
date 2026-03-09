@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -216,13 +217,17 @@ func (m *MongoReader) IncrementUSN(ctx context.Context, userID string) (int, err
 func (m *MongoReader) incrementUSNViaRedis(ctx context.Context, userID string) (int, error) {
 	key := "usn:" + userID
 
-	exists, _ := m.rdb.Exists(ctx, key).Result()
-	if exists == 0 {
-		baseUSN, err := m.getUserUSNFromMongo(ctx, userID)
-		if err != nil {
+	// 只在 key 不存在時做一次 SetNX 初始化，避免 EXISTS -> SetNX 的 TOCTOU。
+	if _, err := m.rdb.Get(ctx, key).Result(); err == redis.Nil {
+		baseUSN, baseErr := m.getUserUSNFromMongo(ctx, userID)
+		if baseErr != nil {
 			baseUSN = 0
 		}
-		m.rdb.SetNX(ctx, key, baseUSN, 0)
+		if _, setErr := m.rdb.SetNX(ctx, key, baseUSN, 0).Result(); setErr != nil {
+			log.Printf("Redis SetNX 初始化 USN 失敗（忽略，繼續 INCR）: %v", setErr)
+		}
+	} else if err != nil {
+		log.Printf("Redis GET USN 失敗（忽略，繼續 INCR）: %v", err)
 	}
 
 	newUSN, err := m.rdb.Incr(ctx, key).Result()

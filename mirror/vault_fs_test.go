@@ -141,3 +141,15 @@ func TestRealVaultFS_WriteFile_Overwrite(t *testing.T) {
 		t.Fatalf("got %q, want %q", string(data), "v2")
 	}
 }
+
+func TestRealVaultFS_PathTraversalRejected(t *testing.T) {
+	root := t.TempDir()
+	fs := &RealVaultFS{Root: root}
+
+	if err := fs.WriteFile("../escape.md", []byte("x")); err == nil {
+		t.Fatal("expected traversal path to be rejected")
+	}
+	if fs.Exists("../escape.md") {
+		t.Fatal("traversal path should never exist")
+	}
+}
