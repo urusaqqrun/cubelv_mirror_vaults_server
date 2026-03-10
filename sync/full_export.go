@@ -38,7 +38,7 @@ func ExportFullVault(ctx context.Context, fs mirror.VaultFS, reader FullExporter
 		if item == nil {
 			continue
 		}
-		if err := exporter.ExportItem(userID, item); err != nil {
+		if _, err := exporter.ExportItem(userID, item); err != nil {
 			log.Printf("[FullExport] %s %s error: %v", item.Type, item.ID, err)
 			skippedCount++
 			continue

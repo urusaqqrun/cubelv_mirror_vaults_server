@@ -236,7 +236,12 @@ func MirrorJSONToItem(raw []byte) (*ItemMirrorData, error) {
 	return &data, nil
 }
 
-// IsVaultFallbackName 判斷 name 是否為 vault 自動產生的 fallback（untitled_{id}）
+// VaultFallbackName 產生 fallback 檔名（當 DB name 為空時使用）
+func VaultFallbackName(id string) string {
+	return "untitled_" + id
+}
+
+// IsVaultFallbackName 判斷 name 是否為 vault 自動產生的 fallback
 func IsVaultFallbackName(name, id string) bool {
-	return name == "untitled_"+id
+	return name == VaultFallbackName(id)
 }

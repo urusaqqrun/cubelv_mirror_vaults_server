@@ -135,26 +135,13 @@ func (h *SyncEventHandler) handleItemEvent(ctx context.Context, event SyncEvent)
 	}
 	exporter := mirror.NewExporter(h.fs, resolver)
 
-	if err := exporter.ExportItem(event.UserID, item); err != nil {
+	result, err := exporter.ExportItem(event.UserID, item)
+	if err != nil {
 		return err
 	}
 
-	// 更新 docPathIndex
-	isFolder := model.IsFolder(item.Type)
-	if isFolder {
-		if p, err := resolver.ResolveFolderPath(item.ID); err == nil {
-			h.setDocPath(event.UserID, item.ID, filepath.Join(event.UserID, p), true)
-		}
-	} else {
-		folderID := item.GetFolderID()
-		if p, err := resolver.ResolveFolderPath(folderID); err == nil {
-			name := item.GetName()
-			if name == "" {
-				name = "untitled_" + item.ID
-			}
-			h.setDocPath(event.UserID, item.ID, filepath.Join(event.UserID, p, mirror.SanitizeItemName(name)+".json"), false)
-		}
-	}
+	// 使用 ExportItem 回傳的實際路徑更新 docPathIndex（含衝突後綴）
+	h.setDocPath(event.UserID, item.ID, result.Path, result.IsFolder)
 	return nil
 }
 

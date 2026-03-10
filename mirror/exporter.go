@@ -121,48 +121,56 @@ func (e *Exporter) ExportChart(userId string, meta CardMeta) error {
 	return nil
 }
 
+// ExportItemResult ExportItem 的回傳結果
+type ExportItemResult struct {
+	Path     string // 實際寫入的完整路徑
+	IsFolder bool
+}
+
 // ExportItem 通用匯出：將任意 Item 寫為 name.json（資料夾會先建目錄）
-func (e *Exporter) ExportItem(userId string, item *model.Item) error {
+func (e *Exporter) ExportItem(userId string, item *model.Item) (ExportItemResult, error) {
 	mirrorData := ItemToMirrorData(item)
 
 	if model.IsFolder(item.Type) {
-		return e.exportFolderItem(userId, mirrorData)
+		path, err := e.exportFolderItem(userId, mirrorData)
+		return ExportItemResult{Path: path, IsFolder: true}, err
 	}
-	return e.exportLeafItem(userId, mirrorData, item)
+	path, err := e.exportLeafItem(userId, mirrorData, item)
+	return ExportItemResult{Path: path, IsFolder: false}, err
 }
 
-// exportFolderItem 匯出資料夾類型：建目錄 + 寫 name.json
-func (e *Exporter) exportFolderItem(userId string, data ItemMirrorData) error {
+// exportFolderItem 匯出資料夾類型：建目錄 + 寫 name.json，回傳目錄路徑
+func (e *Exporter) exportFolderItem(userId string, data ItemMirrorData) (string, error) {
 	folderPath, err := e.resolver.ResolveFolderPath(data.ID)
 	if err != nil {
-		return fmt.Errorf("resolve folder path: %w", err)
+		return "", fmt.Errorf("resolve folder path: %w", err)
 	}
 
 	fullDirPath := filepath.Join(userId, folderPath)
 	e.cleanupOldFolderPath(userId, data.ID, fullDirPath)
 	if err := e.fs.MkdirAll(fullDirPath); err != nil {
-		return fmt.Errorf("mkdir: %w", err)
+		return "", fmt.Errorf("mkdir: %w", err)
 	}
 
 	jsonBytes, err := ItemToMirrorJSON(data)
 	if err != nil {
-		return fmt.Errorf("marshal item json: %w", err)
+		return "", fmt.Errorf("marshal item json: %w", err)
 	}
 
 	jsonPath := filepath.Join(fullDirPath, sanitizeName(data.Name)+".json")
 	if err := e.fs.WriteFile(jsonPath, jsonBytes); err != nil {
-		return err
+		return "", err
 	}
 	e.setIndexedPath(userId, data.ID, fullDirPath)
-	return nil
+	return fullDirPath, nil
 }
 
-// exportLeafItem 匯出非資料夾類型：寫 name.json 到所屬資料夾
-func (e *Exporter) exportLeafItem(userId string, data ItemMirrorData, item *model.Item) error {
+// exportLeafItem 匯出非資料夾類型：寫 name.json 到所屬資料夾，回傳檔案路徑
+func (e *Exporter) exportLeafItem(userId string, data ItemMirrorData, item *model.Item) (string, error) {
 	folderID := item.GetFolderID()
 	folderPath, err := e.resolver.ResolveFolderPath(folderID)
 	if err != nil {
-		return fmt.Errorf("resolve parent folder: %w", err)
+		return "", fmt.Errorf("resolve parent folder: %w", err)
 	}
 
 	fileName := sanitizeName(data.Name) + ".json"
@@ -175,14 +183,14 @@ func (e *Exporter) exportLeafItem(userId string, data ItemMirrorData, item *mode
 
 	jsonBytes, err := ItemToMirrorJSON(data)
 	if err != nil {
-		return fmt.Errorf("marshal item json: %w", err)
+		return "", fmt.Errorf("marshal item json: %w", err)
 	}
 
 	if err := e.fs.WriteFile(fullPath, jsonBytes); err != nil {
-		return err
+		return "", err
 	}
 	e.setIndexedPath(userId, data.ID, fullPath)
-	return nil
+	return fullPath, nil
 }
 
 // resolveCollision 若目標路徑已被不同 ID 佔用，加 _{id後8碼} 後綴
@@ -298,7 +306,8 @@ func (e *Exporter) ExportBatch(userId string, entries []ExportBatchEntry) error 
 		g.Go(func() error {
 			// 新格式優先
 			if entry.Item != nil {
-				return e.ExportItem(userId, entry.Item)
+				_, err := e.ExportItem(userId, entry.Item)
+				return err
 			}
 			// 舊格式相容
 			switch {

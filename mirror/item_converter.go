@@ -134,11 +134,12 @@ func ItemToChartMeta(item *model.Item) CardMeta {
 func ItemToMirrorData(item *model.Item) ItemMirrorData {
 	name := item.GetName()
 	if name == "" {
-		name = "untitled_" + item.ID
+		name = VaultFallbackName(item.ID)
 	}
-	fields := item.Fields
-	if fields == nil {
-		fields = make(map[string]interface{})
+	// 深拷貝 Fields 避免共用 map reference 導致原始 Item 被異動
+	fields := make(map[string]interface{}, len(item.Fields))
+	for k, v := range item.Fields {
+		fields[k] = v
 	}
 	return ItemMirrorData{
 		ID:       item.ID,
