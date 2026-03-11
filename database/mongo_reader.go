@@ -233,6 +233,7 @@ func (m *MongoReader) GetChangesAfterUSN(ctx context.Context, userID string, aft
 				DocID:      row.ID,
 				Action:     "update",
 				Timestamp:  ts,
+				USN:        row.Fields.Usn,
 			},
 		})
 	}
@@ -268,6 +269,7 @@ func (m *MongoReader) GetChangesAfterUSN(ctx context.Context, userID string, aft
 				DocID:      row.ItemID,
 				Action:     "delete",
 				Timestamp:  ts,
+				USN:        row.USN,
 			},
 		})
 	}
@@ -289,8 +291,11 @@ func (m *MongoReader) GetChangesAfterUSN(ctx context.Context, userID string, aft
 }
 
 // GetDocUSN 從 Item collection 查詢文件當前 USN（衝突判定用）。
-// 文件不存在時回傳 -1。
+// 文件不存在時回傳 -1。舊格式 collection 回傳 0 跳過衝突判定。
 func (m *MongoReader) GetDocUSN(ctx context.Context, userID, collection, docID string) (int, error) {
+	if collection != "item" {
+		return 0, nil
+	}
 	var row struct {
 		Fields struct {
 			Usn int `bson:"usn"`

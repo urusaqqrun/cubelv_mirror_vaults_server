@@ -52,8 +52,8 @@ func TestUSNPoller_WithChanges(t *testing.T) {
 	querier := newMockQuerier()
 	querier.latestUSN["user1"] = 8
 	querier.changes["user1"] = []SyncEvent{
-		{Collection: "note", UserID: "user1", DocID: "n1", Action: "create"},
-		{Collection: "note", UserID: "user1", DocID: "n2", Action: "update"},
+		{Collection: "note", UserID: "user1", DocID: "n1", Action: "create", USN: 6},
+		{Collection: "note", UserID: "user1", DocID: "n2", Action: "update", USN: 8},
 	}
 
 	handler := &mockHandler{}

@@ -87,6 +87,9 @@ func (i *Item) GetFolderID() string {
 
 // strField 從 fields map 取出字串值
 func strField(fields map[string]interface{}, key string) string {
+	if fields == nil {
+		return ""
+	}
 	if v, ok := fields[key]; ok {
 		if s, ok := v.(string); ok {
 			return s

@@ -25,6 +25,7 @@ type SyncEvent struct {
 	DocID      string
 	Action     string // create / update / delete
 	Timestamp  int64
+	USN        int // USN poller 用，Redis Streams 事件為 0
 }
 
 // EventHandler 事件處理介面（方便 mock）
@@ -96,6 +97,12 @@ func (c *Consumer) Start(ctx context.Context) error {
 		for _, stream := range results {
 			for _, msg := range stream.Messages {
 				event := parseEvent(msg.Values)
+				// 驗證必要欄位，缺少則 ACK 後跳過
+				if event.UserID == "" || event.DocID == "" {
+					log.Printf("parseEvent 缺少必要欄位 (id=%s): userID=%q docID=%q，ACK 並跳過", msg.ID, event.UserID, event.DocID)
+					c.rdb.XAck(ctx, StreamName, ConsumerGroup, msg.ID)
+					continue
+				}
 				if err := c.handler.HandleEvent(ctx, event); err != nil {
 					if errors.Is(err, ErrVaultLocked) {
 						log.Printf("HandleEvent locked (id=%s), keep pending", msg.ID)

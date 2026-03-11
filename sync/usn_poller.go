@@ -109,12 +109,9 @@ func (p *USNPoller) PollUser(ctx context.Context, userId string) int {
 			continue
 		}
 		processed++
-	}
-
-	if len(changes) > 0 {
-		latestUSN, err := p.querier.GetLatestUSN(ctx, userId)
-		if err == nil && latestUSN > maxUSN {
-			maxUSN = latestUSN
+		// 只推進成功處理的事件 USN
+		if event.USN > maxUSN {
+			maxUSN = event.USN
 		}
 	}
 
