@@ -86,3 +86,69 @@ func TestEnsureDocID_UpdateWithEmptyID(t *testing.T) {
 		t.Fatal("ensureDocID should not generate _id for non-create actions")
 	}
 }
+
+// --- 新格式 itemDataToItemBson ---
+
+func TestItemDataToItemBson_BasicMapping(t *testing.T) {
+	data := &mirror.ItemMirrorData{
+		ID:       "item1",
+		Name:     "測試",
+		ItemType: "KANBAN",
+		Fields:   map[string]interface{}{"color": "red", "size": float64(5)},
+	}
+	doc := itemDataToItemBson(data, 10)
+
+	if doc["_id"] != "item1" {
+		t.Errorf("_id: got %v", doc["_id"])
+	}
+	if doc["name"] != "測試" {
+		t.Errorf("name: got %v", doc["name"])
+	}
+	if doc["itemType"] != "KANBAN" {
+		t.Errorf("itemType: got %v", doc["itemType"])
+	}
+	fields, ok := doc["fields"].(bson.M)
+	if !ok {
+		t.Fatal("fields should be bson.M")
+	}
+	if fields["color"] != "red" {
+		t.Errorf("fields.color: got %v", fields["color"])
+	}
+	if fields["usn"] != 10 {
+		t.Errorf("fields.usn: got %v", fields["usn"])
+	}
+	if _, ok := fields["updatedAt"]; !ok {
+		t.Error("fields.updatedAt should be set")
+	}
+}
+
+func TestItemDataToItemBson_ZeroUSN_NotSet(t *testing.T) {
+	data := &mirror.ItemMirrorData{
+		ID:       "item2",
+		Name:     "no-usn",
+		ItemType: "NOTE",
+		Fields:   map[string]interface{}{},
+	}
+	doc := itemDataToItemBson(data, 0)
+	fields := doc["fields"].(bson.M)
+	if _, ok := fields["usn"]; ok {
+		t.Error("usn should not be set when value is 0")
+	}
+}
+
+func TestItemDataToItemBson_DoesNotMutateOriginal(t *testing.T) {
+	originalFields := map[string]interface{}{"key": "value"}
+	data := &mirror.ItemMirrorData{
+		ID:       "item3",
+		Name:     "test",
+		ItemType: "NOTE",
+		Fields:   originalFields,
+	}
+	doc := itemDataToItemBson(data, 5)
+	fields := doc["fields"].(bson.M)
+	fields["injected"] = "bad"
+
+	if _, ok := originalFields["injected"]; ok {
+		t.Fatal("itemDataToItemBson should not share Fields map with original")
+	}
+}

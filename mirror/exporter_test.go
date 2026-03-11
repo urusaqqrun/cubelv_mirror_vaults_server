@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/urusaqqrun/vault-mirror-service/model"
 )
 
 func newTestExporter() (*Exporter, *MemoryVaultFS) {
@@ -221,5 +223,179 @@ func TestDeleteNote_RemovesMDFile(t *testing.T) {
 
 	if fs.Exists("user1/NOTE/工作/test.md") {
 		t.Error("MD 檔案應已刪除")
+	}
+}
+
+// --- 新格式 ExportItem / DeleteItem / resolveCollision ---
+
+func newItemTestExporter() (*Exporter, *MemoryVaultFS) {
+	fs := NewMemoryVaultFS()
+	resolver := NewPathResolver([]FolderNode{
+		{ID: "f1", FolderName: "工作", Type: "NOTE", ParentID: nil},
+		{ID: "c1", FolderName: "看板", Type: "CARD", ParentID: nil},
+	})
+	return NewExporter(fs, resolver), fs
+}
+
+func TestExportItem_LeafWritesJSON(t *testing.T) {
+	exp, fs := newItemTestExporter()
+	item := &model.Item{
+		ID:   "i1",
+		Name: "會議記錄",
+		Type: "NOTE",
+		Fields: map[string]interface{}{
+			"folderID": "f1",
+			"content":  "hello",
+		},
+	}
+	result, err := exp.ExportItem("user1", item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsFolder {
+		t.Error("NOTE item should not be folder")
+	}
+	if !fs.Exists("user1/NOTE/工作/會議記錄.json") {
+		t.Error("JSON file should exist at expected path")
+	}
+	if result.Path != "user1/NOTE/工作/會議記錄.json" {
+		t.Errorf("returned path: got %q", result.Path)
+	}
+}
+
+func TestExportItem_FolderCreatesDir(t *testing.T) {
+	fs := NewMemoryVaultFS()
+	resolver := NewPathResolver([]FolderNode{
+		{ID: "f-new", FolderName: "新目錄", Type: "NOTE", ParentID: nil},
+	})
+	exp := NewExporter(fs, resolver)
+
+	item := &model.Item{
+		ID:     "f-new",
+		Name:   "新目錄",
+		Type:   "NOTE_FOLDER",
+		Fields: map[string]interface{}{},
+	}
+	result, err := exp.ExportItem("user1", item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IsFolder {
+		t.Error("FOLDER item should be folder")
+	}
+	if !fs.Exists("user1/NOTE/新目錄") {
+		t.Error("directory should be created")
+	}
+	if !fs.Exists("user1/NOTE/新目錄/新目錄.json") {
+		t.Error("folder metadata JSON should exist")
+	}
+}
+
+func TestExportItem_EmptyName_UsesFallback(t *testing.T) {
+	exp, fs := newItemTestExporter()
+	item := &model.Item{
+		ID:   "abc12345",
+		Name: "",
+		Type: "NOTE",
+		Fields: map[string]interface{}{
+			"folderID": "f1",
+		},
+	}
+	_, err := exp.ExportItem("user1", item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedName := VaultFallbackName("abc12345")
+	if !fs.Exists("user1/NOTE/工作/" + sanitizeName(expectedName) + ".json") {
+		t.Errorf("should use fallback name %q", expectedName)
+	}
+}
+
+func TestExportItem_ResolveCollision_DifferentID(t *testing.T) {
+	exp, fs := newItemTestExporter()
+	item1 := &model.Item{
+		ID: "id_aaaabbbb", Name: "同名", Type: "NOTE",
+		Fields: map[string]interface{}{"folderID": "f1"},
+	}
+	item2 := &model.Item{
+		ID: "id_ccccdddd", Name: "同名", Type: "NOTE",
+		Fields: map[string]interface{}{"folderID": "f1"},
+	}
+	if _, err := exp.ExportItem("user1", item1); err != nil {
+		t.Fatal(err)
+	}
+	result, err := exp.ExportItem("user1", item2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// item2 的路徑應帶 id 後綴
+	if !strings.Contains(result.Path, "_ccccdddd") {
+		t.Errorf("collision should add id suffix, got path: %q", result.Path)
+	}
+	if !fs.Exists(result.Path) {
+		t.Error("collision-resolved file should exist")
+	}
+}
+
+func TestExportItem_ResolveCollision_SameID_Overwrites(t *testing.T) {
+	exp, _ := newItemTestExporter()
+	item := &model.Item{
+		ID: "same-id", Name: "同名", Type: "NOTE",
+		Fields: map[string]interface{}{"folderID": "f1"},
+	}
+	if _, err := exp.ExportItem("user1", item); err != nil {
+		t.Fatal(err)
+	}
+	item.Fields["content"] = "updated"
+	result, err := exp.ExportItem("user1", item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Path != "user1/NOTE/工作/同名.json" {
+		t.Errorf("same ID should overwrite without suffix, got: %q", result.Path)
+	}
+}
+
+func TestDeleteItem_RemovesLeaf(t *testing.T) {
+	exp, fs := newItemTestExporter()
+	item := &model.Item{
+		ID: "del1", Name: "要刪除", Type: "NOTE",
+		Fields: map[string]interface{}{"folderID": "f1"},
+	}
+	if _, err := exp.ExportItem("user1", item); err != nil {
+		t.Fatal(err)
+	}
+	if !fs.Exists("user1/NOTE/工作/要刪除.json") {
+		t.Fatal("file should exist before delete")
+	}
+	if err := exp.DeleteItem("user1", "del1"); err != nil {
+		t.Fatal(err)
+	}
+	if fs.Exists("user1/NOTE/工作/要刪除.json") {
+		t.Error("file should be removed after DeleteItem")
+	}
+}
+
+func TestExportItem_RenameCleanupOldPath(t *testing.T) {
+	exp, fs := newItemTestExporter()
+	item := &model.Item{
+		ID: "ren1", Name: "舊名", Type: "NOTE",
+		Fields: map[string]interface{}{"folderID": "f1"},
+	}
+	if _, err := exp.ExportItem("user1", item); err != nil {
+		t.Fatal(err)
+	}
+	if !fs.Exists("user1/NOTE/工作/舊名.json") {
+		t.Fatal("old file should exist")
+	}
+	item.Name = "新名"
+	if _, err := exp.ExportItem("user1", item); err != nil {
+		t.Fatal(err)
+	}
+	if fs.Exists("user1/NOTE/工作/舊名.json") {
+		t.Error("old file should be removed after rename")
+	}
+	if !fs.Exists("user1/NOTE/工作/新名.json") {
+		t.Error("new file should exist after rename")
 	}
 }

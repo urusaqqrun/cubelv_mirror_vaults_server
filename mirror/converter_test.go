@@ -245,6 +245,72 @@ func TestJSONToCard(t *testing.T) {
 	}
 }
 
+// --- 新格式 ItemMirrorData 序列化 / 反序列化 ---
+
+func TestVaultFallbackName(t *testing.T) {
+	got := VaultFallbackName("69a722717998c644cb2610a0")
+	if got != "untitled_69a722717998c644cb2610a0" {
+		t.Errorf("got %q, want %q", got, "untitled_69a722717998c644cb2610a0")
+	}
+}
+
+func TestIsVaultFallbackName(t *testing.T) {
+	id := "abc123"
+	if !IsVaultFallbackName("untitled_abc123", id) {
+		t.Error("should match fallback name")
+	}
+	if IsVaultFallbackName("my-note", id) {
+		t.Error("should not match non-fallback name")
+	}
+	if IsVaultFallbackName("untitled_xyz", id) {
+		t.Error("should not match fallback for different id")
+	}
+}
+
+func TestItemToMirrorJSON_Roundtrip(t *testing.T) {
+	data := ItemMirrorData{
+		ID:       "item1",
+		Name:     "測試項目",
+		ItemType: "KANBAN",
+		Fields:   map[string]interface{}{"color": "red", "count": float64(42)},
+	}
+	jsonBytes, err := ItemToMirrorJSON(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := MirrorJSONToItem(jsonBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.ID != data.ID || parsed.Name != data.Name || parsed.ItemType != data.ItemType {
+		t.Errorf("roundtrip mismatch: got %+v", parsed)
+	}
+	if parsed.Fields["color"] != "red" {
+		t.Errorf("fields.color: got %v", parsed.Fields["color"])
+	}
+}
+
+func TestMirrorJSONToItem_MissingID(t *testing.T) {
+	_, err := MirrorJSONToItem([]byte(`{"name":"test","itemType":"NOTE","fields":{}}`))
+	if err == nil {
+		t.Error("should error when id is missing")
+	}
+}
+
+func TestMirrorJSONToItem_MissingItemType(t *testing.T) {
+	_, err := MirrorJSONToItem([]byte(`{"id":"x","name":"test","fields":{}}`))
+	if err == nil {
+		t.Error("should error when itemType is missing")
+	}
+}
+
+func TestMirrorJSONToItem_InvalidJSON(t *testing.T) {
+	_, err := MirrorJSONToItem([]byte(`not valid json`))
+	if err == nil {
+		t.Error("should error on invalid json")
+	}
+}
+
 // extractFrontmatterField 從 markdown 中提取 frontmatter 欄位值
 func extractFrontmatterField(md, field string) string {
 	for _, line := range strings.Split(md, "\n") {

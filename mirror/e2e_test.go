@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/urusaqqrun/vault-mirror-service/model"
 )
 
 // E2E 場景 1: 用戶建 Note → Vault 同步
@@ -326,6 +328,163 @@ func TestE2E_SpecialCharacters_InNames(t *testing.T) {
 	}
 	if !fs.Exists("user1/NOTE/_unnamed/_unnamed.md") {
 		t.Fatal("expected empty-name fallback path to exist")
+	}
+}
+
+// --- 新格式 Item 完整匯出匯入流程 ---
+
+func TestE2E_ExportItem_ThenImport_Roundtrip(t *testing.T) {
+	fs := NewMemoryVaultFS()
+	resolver := NewPathResolver([]FolderNode{
+		{ID: "f1", FolderName: "筆記", Type: "NOTE", ParentID: nil},
+	})
+	exporter := NewExporter(fs, resolver)
+
+	item := &model.Item{
+		ID:   "n-new",
+		Name: "新格式筆記",
+		Type: "NOTE",
+		Fields: map[string]interface{}{
+			"folderID": "f1",
+			"content":  "<p>Hello World</p>",
+			"usn":      float64(3),
+		},
+	}
+
+	result, err := exporter.ExportItem("user1", item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Path != "user1/NOTE/筆記/新格式筆記.json" {
+		t.Fatalf("unexpected path: %q", result.Path)
+	}
+
+	// 匯入
+	importer := NewImporter(fs)
+	entries, err := importer.ProcessDiff("user1",
+		[]string{"NOTE/筆記/新格式筆記.json"}, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("got %d entries, want 1", len(entries))
+	}
+	e := entries[0]
+	if e.ItemData == nil {
+		t.Fatal("should parse as new format ItemData")
+	}
+	if e.ItemData.ID != "n-new" {
+		t.Errorf("imported ID mismatch: %q", e.ItemData.ID)
+	}
+	if e.ItemData.Name != "新格式筆記" {
+		t.Errorf("imported Name mismatch: %q", e.ItemData.Name)
+	}
+	if e.ItemData.Fields["content"] != "<p>Hello World</p>" {
+		t.Errorf("imported content mismatch: %v", e.ItemData.Fields["content"])
+	}
+}
+
+func TestE2E_ExportItem_EmptyName_ImportClears(t *testing.T) {
+	fs := NewMemoryVaultFS()
+	resolver := NewPathResolver([]FolderNode{
+		{ID: "f1", FolderName: "筆記", Type: "NOTE", ParentID: nil},
+	})
+	exporter := NewExporter(fs, resolver)
+
+	item := &model.Item{
+		ID:   "empty-name-id",
+		Name: "",
+		Type: "NOTE",
+		Fields: map[string]interface{}{
+			"folderID": "f1",
+		},
+	}
+
+	_, err := exporter.ExportItem("user1", item)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fallbackName := VaultFallbackName("empty-name-id")
+	expectedFile := "user1/NOTE/筆記/" + sanitizeName(fallbackName) + ".json"
+	if !fs.Exists(expectedFile) {
+		t.Fatalf("file with fallback name should exist at %q", expectedFile)
+	}
+
+	// 匯入時 fallback name 應被清除
+	importer := NewImporter(fs)
+	entries, err := importer.ProcessDiff("user1",
+		[]string{"NOTE/筆記/" + sanitizeName(fallbackName) + ".json"}, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entries[0].ItemData.Name != "" {
+		t.Errorf("fallback name should be cleared on import, got %q", entries[0].ItemData.Name)
+	}
+}
+
+func TestE2E_ExportItem_CollisionThenDelete(t *testing.T) {
+	fs := NewMemoryVaultFS()
+	resolver := NewPathResolver([]FolderNode{
+		{ID: "f1", FolderName: "工作", Type: "NOTE", ParentID: nil},
+	})
+	exporter := NewExporter(fs, resolver)
+
+	item1 := &model.Item{
+		ID: "aaa11111", Name: "同名", Type: "NOTE",
+		Fields: map[string]interface{}{"folderID": "f1"},
+	}
+	item2 := &model.Item{
+		ID: "bbb22222", Name: "同名", Type: "NOTE",
+		Fields: map[string]interface{}{"folderID": "f1"},
+	}
+
+	r1, _ := exporter.ExportItem("user1", item1)
+	r2, _ := exporter.ExportItem("user1", item2)
+
+	if r1.Path == r2.Path {
+		t.Fatal("collision items should have different paths")
+	}
+	if !fs.Exists(r1.Path) || !fs.Exists(r2.Path) {
+		t.Fatal("both files should exist")
+	}
+
+	// 刪除 item1
+	if err := exporter.DeleteItem("user1", "aaa11111"); err != nil {
+		t.Fatal(err)
+	}
+	if fs.Exists(r1.Path) {
+		t.Error("item1 should be deleted")
+	}
+	if !fs.Exists(r2.Path) {
+		t.Error("item2 should still exist")
+	}
+}
+
+func TestE2E_GenericFolderType_Export(t *testing.T) {
+	fs := NewMemoryVaultFS()
+	resolver := NewPathResolver([]FolderNode{
+		{ID: "kf1", FolderName: "看板一", Type: "KANBAN", ParentID: nil},
+	})
+	exporter := NewExporter(fs, resolver)
+
+	folderItem := &model.Item{
+		ID:   "kf1",
+		Name: "看板一",
+		Type: "KANBAN_FOLDER",
+		Fields: map[string]interface{}{
+			"memberID": "u1",
+		},
+	}
+	result, err := exporter.ExportItem("user1", folderItem)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IsFolder {
+		t.Error("KANBAN_FOLDER should be detected as folder")
+	}
+	if !fs.Exists("user1/KANBAN/看板一") {
+		t.Error("KANBAN/ root directory should be created")
 	}
 }
 

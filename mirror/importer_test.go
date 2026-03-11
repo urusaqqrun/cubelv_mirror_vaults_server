@@ -207,6 +207,93 @@ func TestProcessDiff_MixedChanges(t *testing.T) {
 	}
 }
 
+// --- 新格式 JSON 解析 ---
+
+func TestProcessDiff_NewFormatJSON_Created(t *testing.T) {
+	imp, fs := setupImporterFS()
+
+	itemJSON := `{"id":"item1","name":"看板1","itemType":"KANBAN","fields":{"color":"red"}}`
+	fs.WriteFile("user1/KANBAN/看板/看板1.json", []byte(itemJSON))
+
+	entries, err := imp.ProcessDiff("user1", []string{"KANBAN/看板/看板1.json"}, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("got %d entries, want 1", len(entries))
+	}
+	e := entries[0]
+	if e.ItemData == nil {
+		t.Fatal("ItemData should not be nil for new format")
+	}
+	if e.ItemData.ID != "item1" {
+		t.Errorf("ID: got %q, want %q", e.ItemData.ID, "item1")
+	}
+	if e.ItemData.ItemType != "KANBAN" {
+		t.Errorf("ItemType: got %q, want %q", e.ItemData.ItemType, "KANBAN")
+	}
+	if e.ItemType != "KANBAN" {
+		t.Errorf("entry.ItemType: got %q, want %q", e.ItemType, "KANBAN")
+	}
+}
+
+func TestProcessDiff_NewFormat_FallbackNameCleared(t *testing.T) {
+	imp, fs := setupImporterFS()
+
+	itemJSON := `{"id":"abc123","name":"untitled_abc123","itemType":"NOTE","fields":{}}`
+	fs.WriteFile("user1/NOTE/工作/untitled_abc123.json", []byte(itemJSON))
+
+	entries, err := imp.ProcessDiff("user1", []string{"NOTE/工作/untitled_abc123.json"}, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("got %d entries, want 1", len(entries))
+	}
+	if entries[0].ItemData.Name != "" {
+		t.Errorf("fallback name should be cleared, got %q", entries[0].ItemData.Name)
+	}
+}
+
+func TestProcessDiff_OldFolderJSON_StillWorks(t *testing.T) {
+	imp, fs := setupImporterFS()
+
+	folderJSON := `{"ID":"f1","memberID":"u1","folderName":"舊資料夾","type":"NOTE"}`
+	fs.WriteFile("user1/NOTE/舊資料夾/_folder.json", []byte(folderJSON))
+
+	entries, err := imp.ProcessDiff("user1", []string{"NOTE/舊資料夾/_folder.json"}, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("got %d entries, want 1", len(entries))
+	}
+	if entries[0].FolderMeta == nil {
+		t.Fatal("old format _folder.json should still parse as FolderMeta")
+	}
+	if entries[0].ItemData != nil {
+		t.Error("old format should NOT produce ItemData")
+	}
+}
+
+func TestDetectItemType_GenericRootDir(t *testing.T) {
+	tests := []struct {
+		path     string
+		expected string
+	}{
+		{"KANBAN/board/task.json", "KANBAN"},
+		{"WHITEBOARD/stuff/drawing.json", "WHITEBOARD"},
+		{"NOTE/folder/note.md", "NOTE"},
+		{"CARD/list/card.json", "CARD"},
+	}
+	for _, tt := range tests {
+		got := detectItemType(tt.path)
+		if got != tt.expected {
+			t.Errorf("detectItemType(%q): got %q, want %q", tt.path, got, tt.expected)
+		}
+	}
+}
+
 func TestDetectItemType(t *testing.T) {
 	tests := []struct {
 		path     string
