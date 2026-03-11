@@ -22,6 +22,7 @@ func ItemToNoteMeta(item *model.Item) (NoteMeta, string) {
 		ParentID:  parentID,
 		FolderID:  folderID,
 		Title:     item.GetTitle(),
+		Type:      item.Type,
 		USN:       item.GetUSN(),
 		Tags:      model.StringSliceField(f, "tags"),
 		IsNew:     model.BoolField(f, "isNew"),

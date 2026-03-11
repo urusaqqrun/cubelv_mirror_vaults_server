@@ -19,7 +19,9 @@ type FullExporter interface {
 func ExportFullVault(ctx context.Context, fs mirror.VaultFS, reader FullExporter, userID string) error {
 	log.Printf("[FullExport] 開始匯出用戶 %s 的 Vault", userID)
 
-	fs.MkdirAll(userID)
+	if err := fs.MkdirAll(userID); err != nil {
+		return fmt.Errorf("mkdir user root: %w", err)
+	}
 
 	folderItems, err := reader.ListItemFolders(ctx, userID)
 	if err != nil {
@@ -47,7 +49,9 @@ func ExportFullVault(ctx context.Context, fs mirror.VaultFS, reader FullExporter
 	}
 
 	claudeMD := buildClaudeMD()
-	fs.WriteFile(userID+"/CLAUDE.md", []byte(claudeMD))
+	if err := fs.WriteFile(userID+"/CLAUDE.md", []byte(claudeMD)); err != nil {
+		log.Printf("[FullExport] write CLAUDE.md error: %v", err)
+	}
 
 	log.Printf("[FullExport] 用戶 %s 匯出完成: %d items (skipped: %d)",
 		userID, itemCount, skippedCount)

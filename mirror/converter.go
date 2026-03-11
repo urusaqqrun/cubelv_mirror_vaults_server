@@ -233,6 +233,9 @@ func MirrorJSONToItem(raw []byte) (*ItemMirrorData, error) {
 	if data.ID == "" || data.ItemType == "" {
 		return nil, fmt.Errorf("invalid mirror json: missing id or itemType")
 	}
+	if data.Fields == nil {
+		data.Fields = make(map[string]interface{})
+	}
 	return &data, nil
 }
 

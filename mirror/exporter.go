@@ -193,7 +193,8 @@ func (e *Exporter) exportLeafItem(userId string, data ItemMirrorData, item *mode
 	return fullPath, nil
 }
 
-// resolveCollision 若目標路徑已被不同 ID 佔用，加 _{id後8碼} 後綴
+// resolveCollision 若目標路徑已被不同 ID 佔用，加 _{id後8碼} 後綴。
+// 支援迴圈檢查：若後綴路徑也被佔用，改用完整 ID 作為後綴。
 func (e *Exporter) resolveCollision(targetPath, itemID string) string {
 	if !e.fs.Exists(targetPath) {
 		return targetPath
@@ -206,13 +207,28 @@ func (e *Exporter) resolveCollision(targetPath, itemID string) string {
 	if err != nil || parsed.ID == itemID {
 		return targetPath
 	}
+
 	ext := filepath.Ext(targetPath)
 	base := strings.TrimSuffix(targetPath, ext)
+
+	// 先嘗試短後綴（ID 後 8 碼）
 	suffix := itemID
 	if len(suffix) > 8 {
 		suffix = suffix[len(suffix)-8:]
 	}
-	return base + "_" + suffix + ext
+	candidate := base + "_" + suffix + ext
+	if !e.fs.Exists(candidate) {
+		return candidate
+	}
+	if data, err := e.fs.ReadFile(candidate); err == nil {
+		if p, err := MirrorJSONToItem(data); err == nil && p.ID == itemID {
+			return candidate
+		}
+	}
+
+	// 短後綴也被佔用 → 使用完整 ID
+	candidate = base + "_" + itemID + ext
+	return candidate
 }
 
 // cleanupOldItemPath 清理同 ID 但舊位置的檔案（改名/搬移情境）
@@ -338,36 +354,6 @@ func (e *Exporter) ExportBatch(userId string, entries []ExportBatchEntry) error 
 		})
 	}
 	return g.Wait()
-}
-
-// removeOldNoteInDir 掃描單一目錄，找到同 ID 舊檔就刪除並回傳 true。
-func (e *Exporter) removeOldNoteInDir(dir string, noteID string, excludePath string) bool {
-	entries, err := e.fs.ListDir(dir)
-	if err != nil {
-		return false
-	}
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		path := filepath.Join(dir, entry.Name())
-		if path == excludePath {
-			continue
-		}
-		data, err := e.fs.ReadFile(path)
-		if err != nil {
-			continue
-		}
-		meta, _, err := MarkdownToNote(string(data))
-		if err != nil {
-			continue
-		}
-		if meta.ID == noteID {
-			e.fs.Remove(path)
-			return true
-		}
-	}
-	return false
 }
 
 // cleanupOldFolderPath 清理同 ID 但舊位置的資料夾（搬移/改名情境）

@@ -182,6 +182,20 @@ func sanitizeName(name string) string {
 	}
 	name = strings.ReplaceAll(name, "/", "_")
 	name = strings.ReplaceAll(name, "\\", "_")
-	name = strings.ReplaceAll(name, "\x00", "")
+	// 移除控制字元（U+0000 ~ U+001F, U+007F）
+	var b strings.Builder
+	for _, r := range name {
+		if r >= 0x20 && r != 0x7F {
+			b.WriteRune(r)
+		}
+	}
+	name = b.String()
+	if name == "" {
+		return "_unnamed"
+	}
+	// 防止路徑穿越
+	if name == "." || name == ".." {
+		return "_" + name
+	}
 	return name
 }
