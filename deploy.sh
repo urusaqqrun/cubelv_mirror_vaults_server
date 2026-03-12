@@ -30,9 +30,9 @@ if [ -n "$CLOUDMAP_SVC_ID" ]; then
   echo "💡 CloudMap Service ARN = ${CLOUDMAP_SVC_ARN}"
 fi
 
-# EFS 配置（需先在 AWS Console 或 CLI 建立 EFS + Access Point）
-EFS_FILE_SYSTEM_ID="${EFS_FILE_SYSTEM_ID:-}"
-EFS_ACCESS_POINT_ID="${EFS_ACCESS_POINT_ID:-}"
+# EFS 配置
+EFS_FILE_SYSTEM_ID="${EFS_FILE_SYSTEM_ID:-fs-04575e906b767bc9a}"
+EFS_ACCESS_POINT_ID="${EFS_ACCESS_POINT_ID:-fsap-05e878070ac812170}"
 
 # 檢查參數
 if [ -n "$1" ]; then
@@ -45,6 +45,13 @@ fi
 # ----------------------------------------
 if [ -z "$AWS_ACCOUNT_ID" ] || [ "$AWS_ACCOUNT_ID" = "XXXXXXXXXXXX" ]; then
   echo "錯誤: 請提供有效的 AWS_ACCOUNT_ID (可以作為第一個參數傳入)"; exit 1
+fi
+
+if [ -z "$EFS_FILE_SYSTEM_ID" ]; then
+  echo "錯誤: EFS_FILE_SYSTEM_ID 未設定"; exit 1
+fi
+if [ -z "$EFS_ACCESS_POINT_ID" ]; then
+  echo "錯誤: EFS_ACCESS_POINT_ID 未設定"; exit 1
 fi
 
 if ! command -v aws &>/dev/null; then
