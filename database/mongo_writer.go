@@ -59,31 +59,38 @@ func (m *MongoReader) UpsertChart(ctx context.Context, userID string, doc bson.M
 	return m.upsertDoc(ctx, m.chartsCol(), userID, doc)
 }
 
-// UpsertItem 以 _id 為 key 對 Item collection 做 upsert（fields.memberID 作為 filter）
+// UpsertItem 以 _id 為 key 對 Item collection 做 upsert（fields.memberID 作為 filter）。
+// 使用 dot notation 展開 fields 子文件，確保僅更新傳入的欄位，不覆蓋 DB 中既有但未傳入的欄位。
 func (m *MongoReader) UpsertItem(ctx context.Context, userID string, doc bson.M) error {
 	id, ok := doc["_id"].(string)
 	if !ok || id == "" {
 		return fmt.Errorf("missing _id in item doc")
 	}
-	setDoc := make(bson.M, len(doc))
+
+	setDoc := make(bson.M)
+
+	// 頂層欄位（name, itemType 等）直接 $set
 	for k, v := range doc {
-		if k == "_id" {
+		if k == "_id" || k == "fields" {
 			continue
 		}
 		setDoc[k] = v
 	}
-	// 確保 fields.memberID 正確，僅 $set 傳入的欄位（不刪除 DB 中既有但未傳入的欄位）
+
+	// fields 子文件展開為 dot notation，避免整個替換
 	var fields bson.M
-	switch typed := setDoc["fields"].(type) {
+	switch typed := doc["fields"].(type) {
 	case bson.M:
 		fields = typed
 	case map[string]interface{}:
 		fields = bson.M(typed)
 	default:
 		fields = bson.M{}
-		setDoc["fields"] = fields
 	}
 	fields["memberID"] = userID
+	for k, v := range fields {
+		setDoc["fields."+k] = v
+	}
 
 	_, err := m.itemsCol().UpdateOne(ctx, bson.M{"_id": id, "fields.memberID": userID},
 		bson.M{"$set": setDoc},

@@ -105,11 +105,11 @@ func (p *USNPoller) PollUser(ctx context.Context, userId string) int {
 	processed := 0
 	for _, event := range changes {
 		if err := p.handler.HandleEvent(ctx, event); err != nil {
-			log.Printf("USN poll handle error: %v", err)
-			continue
+			// 遇到失敗立即停止，不跳過：避免後續成功事件推進 maxUSN 導致本事件永久遺失
+			log.Printf("USN poll handle error (user=%s, USN=%d): %v", userId, event.USN, err)
+			break
 		}
 		processed++
-		// 只推進成功處理的事件 USN
 		if event.USN > maxUSN {
 			maxUSN = event.USN
 		}

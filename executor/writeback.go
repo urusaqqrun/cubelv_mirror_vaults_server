@@ -79,41 +79,53 @@ func WriteBack(ctx context.Context, writer DataWriter, usnReader USNReader, usnI
 				}
 			}
 
-			// USN 遞增（Redis INCR 本身是原子操作，可安全並行呼叫）
-			newUSN := 0
-			if usnInc != nil {
-				usn, usnErr := usnInc.IncrementUSN(gCtx, userID)
-				if usnErr != nil {
-					log.Printf("[WriteBack] IncrementUSN error: %v", usnErr)
-					atomic.AddInt64(&errors, 1)
-					return nil
-				}
-				newUSN = usn
-			}
-
 			var err error
-			switch e.Action {
-			case mirror.ImportActionCreate:
-				err = upsertEntry(gCtx, writer, userID, e, newUSN)
-				if err == nil {
-					atomic.AddInt64(&created, 1)
+
+			if e.Action == mirror.ImportActionDelete {
+				// 刪除操作：USN 寫進 DeletionLog，必須先 INCR
+				delUSN := 0
+				if usnInc != nil {
+					usn, usnErr := usnInc.IncrementUSN(gCtx, userID)
+					if usnErr != nil {
+						log.Printf("[WriteBack] IncrementUSN error: %v", usnErr)
+						atomic.AddInt64(&errors, 1)
+						return nil
+					}
+					delUSN = usn
 				}
-			case mirror.ImportActionUpdate:
-				err = upsertEntry(gCtx, writer, userID, e, newUSN)
-				if err == nil {
-					atomic.AddInt64(&updated, 1)
-				}
-			case mirror.ImportActionMove:
-				err = upsertEntry(gCtx, writer, userID, e, newUSN)
-				if err == nil {
-					atomic.AddInt64(&moved, 1)
-				}
-			case mirror.ImportActionDelete:
-				err = deleteEntry(gCtx, writer, userID, e, newUSN)
+				err = deleteEntry(gCtx, writer, userID, e, delUSN)
 				if err == nil {
 					atomic.AddInt64(&deleted, 1)
 				}
+			} else {
+				// 建立/更新/搬移：先寫 DB（不含新 USN），成功後再 INCR 並回寫 USN
+				err = upsertEntry(gCtx, writer, userID, e, 0)
+				if err == nil {
+					switch e.Action {
+					case mirror.ImportActionCreate:
+						atomic.AddInt64(&created, 1)
+					case mirror.ImportActionUpdate:
+						atomic.AddInt64(&updated, 1)
+					case mirror.ImportActionMove:
+						atomic.AddInt64(&moved, 1)
+					}
+					if usnInc != nil {
+						usn, usnErr := usnInc.IncrementUSN(gCtx, userID)
+						if usnErr != nil {
+							log.Printf("[WriteBack] IncrementUSN error (post-write): %v", usnErr)
+						} else {
+							docID := resolveDocID(e)
+							if docID != "" {
+								usnDoc := bson.M{"_id": docID, "fields": bson.M{"usn": usn}}
+								if setErr := writer.UpsertItem(gCtx, userID, usnDoc); setErr != nil {
+									log.Printf("[WriteBack] USN update error (%s): %v", docID, setErr)
+								}
+							}
+						}
+					}
+				}
 			}
+
 			if err != nil {
 				log.Printf("[WriteBack] %s %s error: %v", e.Action, e.Path, err)
 				atomic.AddInt64(&errors, 1)
