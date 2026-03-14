@@ -101,7 +101,7 @@ func TestRunTask_TransitionCompleted(t *testing.T) {
 	_ = store.CreateTask(nil, task)
 	_, _ = store.TryAcquireUserActiveTask(nil, "user1", "task-1")
 
-	h.runTask("task-1")
+	h.runTask("task-1", "user1")
 	got, _ := store.GetTask(nil, "task-1")
 	if got.Status != TaskStatusCompleted {
 		t.Fatalf("status: got %s", got.Status)
@@ -116,7 +116,7 @@ func TestRunTask_TransitionFailed(t *testing.T) {
 	_ = store.CreateTask(nil, task)
 	_, _ = store.TryAcquireUserActiveTask(nil, "user1", "task-1")
 
-	h.runTask("task-1")
+	h.runTask("task-1", "user1")
 	got, _ := store.GetTask(nil, "task-1")
 	if got.Status != TaskStatusFailed {
 		t.Fatalf("status: got %s", got.Status)

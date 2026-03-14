@@ -121,7 +121,7 @@ func (h *TaskHandler) CreateTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to create task")
 		return
 	}
-	go h.runTask(taskID)
+	go h.runTask(taskID, req.UserID)
 	writeJSON(w, http.StatusCreated, task)
 }
 
@@ -187,7 +187,7 @@ func (h *TaskHandler) CancelTask(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, task)
 }
 
-func (h *TaskHandler) runTask(taskID string) {
+func (h *TaskHandler) runTask(taskID, userID string) {
 	ctx := h.ctx
 
 	// 階段 1：在鎖內將狀態設為 running
@@ -196,6 +196,9 @@ func (h *TaskHandler) runTask(taskID string) {
 	if err != nil || task == nil {
 		if err != nil {
 			log.Printf("[TaskHandler] GetTask error in runTask start: %v", err)
+		}
+		if relErr := h.store.ReleaseUserActiveTask(context.Background(), userID, taskID); relErr != nil {
+			log.Printf("[TaskHandler] ReleaseUserActiveTask error (getTask failed): %v", relErr)
 		}
 		h.mu.Unlock()
 		return

@@ -160,39 +160,60 @@ func (m *MongoReader) ListItemFolders(ctx context.Context, userID string) ([]*mo
 	return out, cur.Err()
 }
 
-// GetLatestUSN 從 Item collection 取得用戶最大 USN
+// GetLatestUSN 從 Item、ItemDeletionLog、User 三處取得用戶最大 USN
 func (m *MongoReader) GetLatestUSN(ctx context.Context, userID string) (int, error) {
-	opts := options.FindOne().
-		SetSort(bson.D{{Key: "fields.usn", Value: -1}}).
-		SetProjection(bson.M{"fields.usn": 1})
-	var row struct {
+	maxUSN := 0
+
+	// 1. Item collection 最大 USN
+	var itemRow struct {
 		Fields struct {
 			Usn int `bson:"usn"`
 		} `bson:"fields"`
 	}
-	latestItemUSN := 0
-	err := m.itemsCol().FindOne(ctx, bson.M{"fields.memberID": userID}, opts).Decode(&row)
+	err := m.itemsCol().FindOne(ctx, bson.M{"fields.memberID": userID},
+		options.FindOne().SetSort(bson.D{{Key: "fields.usn", Value: -1}}).SetProjection(bson.M{"fields.usn": 1}),
+	).Decode(&itemRow)
 	if err != nil && err != mongo.ErrNoDocuments {
 		return 0, err
 	}
-	if err == nil {
-		latestItemUSN = row.Fields.Usn
+	if err == nil && itemRow.Fields.Usn > maxUSN {
+		maxUSN = itemRow.Fields.Usn
 	}
 
+	// 2. ItemDeletionLog 最大 USN
 	var delRow struct {
 		USN int `bson:"usn"`
 	}
-	delErr := m.db.Collection("ItemDeletionLog").FindOne(ctx,
+	err = m.db.Collection("ItemDeletionLog").FindOne(ctx,
 		bson.M{"memberID": userID},
 		options.FindOne().SetSort(bson.D{{Key: "usn", Value: -1}}).SetProjection(bson.M{"usn": 1}),
 	).Decode(&delRow)
-	if delErr != nil && delErr != mongo.ErrNoDocuments {
-		return 0, delErr
+	if err != nil && err != mongo.ErrNoDocuments {
+		return 0, err
 	}
-	if delRow.USN > latestItemUSN {
-		return delRow.USN, nil
+	if delRow.USN > maxUSN {
+		maxUSN = delRow.USN
 	}
-	return latestItemUSN, nil
+
+	// 3. User.usn（Redis 已遞增但尚未寫入 Item 時，User.usn 可能更高）
+	oid, oidErr := primitive.ObjectIDFromHex(userID)
+	if oidErr == nil {
+		var userRow struct {
+			Usn int `bson:"usn"`
+		}
+		err = m.db.Collection("User").FindOne(ctx,
+			bson.M{"_id": oid},
+			options.FindOne().SetProjection(bson.M{"usn": 1}),
+		).Decode(&userRow)
+		if err != nil && err != mongo.ErrNoDocuments {
+			return 0, err
+		}
+		if userRow.Usn > maxUSN {
+			maxUSN = userRow.Usn
+		}
+	}
+
+	return maxUSN, nil
 }
 
 // GetChangesAfterUSN 從 Item collection 回傳大於指定 USN 的變更（兜底用途）。
