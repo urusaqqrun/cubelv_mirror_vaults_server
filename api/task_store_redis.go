@@ -46,7 +46,8 @@ func (s *RedisTaskStore) saveTask(ctx context.Context, task *Task) error {
 	if terminalTask(task.Status) {
 		return s.rdb.Set(ctx, s.taskKey(task.ID), data, defaultTaskTTL()).Err()
 	}
-	return s.rdb.Set(ctx, s.taskKey(task.ID), data, 0).Err()
+	// 執行中任務也設 TTL，避免進程崩潰後 key 永駐
+	return s.rdb.Set(ctx, s.taskKey(task.ID), data, s.activeLockTTL).Err()
 }
 
 func (s *RedisTaskStore) GetTask(ctx context.Context, taskID string) (*Task, error) {

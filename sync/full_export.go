@@ -53,11 +53,14 @@ func ExportFullVault(ctx context.Context, fs mirror.VaultFS, reader FullExporter
 	var itemCount, skippedCount int64
 
 	// Phase 1: 並行匯出所有資料夾（建目錄 + 寫 metadata JSON）
-	g1 := new(errgroup.Group)
+	g1, ctx1 := errgroup.WithContext(ctx)
 	g1.SetLimit(8)
 	for _, item := range folders {
 		item := item
 		g1.Go(func() error {
+			if ctx1.Err() != nil {
+				return ctx1.Err()
+			}
 			if _, err := exporter.ExportItem(userID, item); err != nil {
 				log.Printf("[FullExport] %s %s error: %v", item.Type, item.ID, err)
 				atomic.AddInt64(&skippedCount, 1)
@@ -72,11 +75,14 @@ func ExportFullVault(ctx context.Context, fs mirror.VaultFS, reader FullExporter
 	}
 
 	// Phase 2: 並行匯出所有非資料夾項目（寫入已建立的目錄）
-	g2 := new(errgroup.Group)
+	g2, ctx2 := errgroup.WithContext(ctx)
 	g2.SetLimit(8)
 	for _, item := range leaves {
 		item := item
 		g2.Go(func() error {
+			if ctx2.Err() != nil {
+				return ctx2.Err()
+			}
 			if _, err := exporter.ExportItem(userID, item); err != nil {
 				log.Printf("[FullExport] %s %s error: %v", item.Type, item.ID, err)
 				atomic.AddInt64(&skippedCount, 1)

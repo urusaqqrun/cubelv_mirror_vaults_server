@@ -65,6 +65,9 @@ func (p *USNPoller) GetLastUSN(userId string) int {
 }
 
 func (p *USNPoller) pollAll(ctx context.Context) {
+	if p.activeUsersFn == nil {
+		return
+	}
 	users := p.activeUsersFn()
 	if len(users) == 0 {
 		return
