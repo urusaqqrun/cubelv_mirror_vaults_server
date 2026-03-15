@@ -24,7 +24,7 @@ type VaultLocker interface {
 	IsLocked(userId string) bool
 }
 
-// DataReader 事件處理所需的 Mongo 讀取能力
+// DataReader 事件處理所需的資料讀取能力
 // 由 database 層提供實作，測試可用 mock。
 type DataReader interface {
 	ListFolders(ctx context.Context, userID string) ([]*model.Folder, error)

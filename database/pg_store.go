@@ -17,7 +17,7 @@ import (
 	vaultsync "github.com/urusaqqrun/vault-mirror-service/sync"
 )
 
-// PgStore PostgreSQL 實作，取代 MongoReader/MongoWriter
+// PgStore PostgreSQL 資料存取層
 type PgStore struct {
 	db  *sql.DB
 	rdb *redis.Client

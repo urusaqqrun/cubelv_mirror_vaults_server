@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// USNQuerier 查詢 USN 變更的介面（由 MongoDB client 實作）
+// USNQuerier 查詢 USN 變更的介面（由 database 層實作）
 type USNQuerier interface {
 	GetLatestUSN(ctx context.Context, userId string) (int, error)
 	GetChangesAfterUSN(ctx context.Context, userId string, afterUSN int) ([]SyncEvent, error)

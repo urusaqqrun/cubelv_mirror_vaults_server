@@ -2,8 +2,8 @@
 set -e
 
 # 檢查環境變數
-if [ -z "$MONGO_URI" ]; then
-  echo "⚠️ 警告: MONGO_URI 未設置，同步功能將降級為 no-op"
+if [ -z "$POSTGRES_URI" ]; then
+  echo "⚠️ 警告: POSTGRES_URI 未設置，資料庫功能將無法使用"
 fi
 
 if [ -z "$REDIS_URI" ]; then
@@ -25,7 +25,7 @@ mkdir -p "$VAULT_ROOT"
 echo "啟動配置:"
 echo "- 端口: ${PORT:-8080}"
 echo "- Vault 根目錄: $VAULT_ROOT"
-echo "- MongoDB: $([ -n "$MONGO_URI" ] && echo "已配置" || echo "未配置")"
+echo "- PostgreSQL: $([ -n "$POSTGRES_URI" ] && echo "已配置" || echo "未配置")"
 echo "- Redis: $([ -n "$REDIS_URI" ] && echo "已配置" || echo "未配置")"
 echo "- 最大並發任務: ${MAX_CONCURRENT_TASKS:-3}"
 echo "- Claude CLI: $(command -v claude &>/dev/null && echo "已安裝" || echo "未安裝")"

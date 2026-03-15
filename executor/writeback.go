@@ -16,7 +16,7 @@ import (
 	"github.com/urusaqqrun/vault-mirror-service/mirror"
 )
 
-// Doc 通用文件表示（取代 bson.M，不依賴 MongoDB driver）
+// Doc 通用文件表示
 type Doc = map[string]interface{}
 
 // DataWriter 資料庫寫入能力（由 database 層實作）
@@ -478,7 +478,7 @@ func ensureDocID(doc Doc, action mirror.ImportAction) {
 	}
 }
 
-// generateID 產生 24 字元 hex ID（與 MongoDB ObjectID 格式相容）
+// generateID 產生 24 字元 hex ID
 func generateID() string {
 	b := make([]byte, 12)
 	if _, err := rand.Read(b); err != nil {

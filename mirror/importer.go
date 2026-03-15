@@ -39,7 +39,7 @@ type ImportEntry struct {
 	ItemData *ItemMirrorData
 }
 
-// Importer 負責 Vault 檔案 → MongoDB 資料的匯入
+// Importer 負責 Vault 檔案 → 資料庫資料的匯入
 type Importer struct {
 	fs VaultFS
 }

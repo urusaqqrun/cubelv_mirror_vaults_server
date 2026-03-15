@@ -13,7 +13,7 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// Exporter 負責 MongoDB 資料 → Vault 檔案的匯出
+// Exporter 負責資料庫資料 → Vault 檔案的匯出
 type Exporter struct {
 	fs       VaultFS
 	resolver *PathResolver

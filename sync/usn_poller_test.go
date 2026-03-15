@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// mockUSNQuerier 模擬 MongoDB USN 查詢
+// mockUSNQuerier 模擬 USN 查詢
 type mockUSNQuerier struct {
 	latestUSN map[string]int
 	changes   map[string][]SyncEvent

@@ -195,7 +195,7 @@ func JSONToCard(data []byte) (CardMeta, error) {
 	return meta, err
 }
 
-// MarkdownToHTML 將 Markdown 文字轉為 HTML（用於回寫 MongoDB 的 content 欄位）
+// MarkdownToHTML 將 Markdown 文字轉為 HTML（用於回寫資料庫的 content 欄位）
 func MarkdownToHTML(md string) (string, error) {
 	var buf bytes.Buffer
 	if err := goldmark.Convert([]byte(md), &buf); err != nil {

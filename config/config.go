@@ -4,8 +4,6 @@ import "os"
 
 type Config struct {
 	PostgresURI string
-	MongoURI    string
-	MongoDB     string
 	RedisURI    string
 	VaultRoot   string
 	AnthropicKey string
@@ -22,8 +20,6 @@ type Config struct {
 func Load() *Config {
 	return &Config{
 		PostgresURI:        getEnv("POSTGRES_URI", ""),
-		MongoURI:           getEnv("MONGO_URI", "mongodb://localhost:27017"),
-		MongoDB:            getEnv("MONGO_DB", "NoteCEO"),
 		RedisURI:           getEnv("REDIS_URI", "localhost:6379"),
 		VaultRoot:          getEnv("VAULT_ROOT", "/vaults"),
 		AnthropicKey:       getEnv("ANTHROPIC_API_KEY", ""),

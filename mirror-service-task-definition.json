@@ -64,8 +64,8 @@
                     "valueFrom": "arn:aws:ssm:ap-northeast-1:<AWS_ACCOUNT_ID>:parameter/noteceo/MIRROR_PORT"
                 },
                 {
-                    "name": "MONGO_URI",
-                    "valueFrom": "arn:aws:ssm:ap-northeast-1:<AWS_ACCOUNT_ID>:parameter/noteceo/DATABASE_URI"
+                    "name": "POSTGRES_URI",
+                    "valueFrom": "arn:aws:ssm:ap-northeast-1:<AWS_ACCOUNT_ID>:parameter/noteceo/POSTGRES_URI"
                 },
                 {
                     "name": "REDIS_URI",
