@@ -7,19 +7,17 @@ import (
 	"sync"
 	"testing"
 
-	"go.mongodb.org/mongo-driver/bson"
-
 	"github.com/urusaqqrun/vault-mirror-service/mirror"
 )
 
 type mockWriter struct {
 	mu sync.Mutex
 
-	upsertFolderDocs []bson.M
-	upsertNoteDocs   []bson.M
-	upsertCardDocs   []bson.M
-	upsertChartDocs  []bson.M
-	upsertItemDocs   []bson.M
+	upsertFolderDocs []Doc
+	upsertNoteDocs   []Doc
+	upsertCardDocs   []Doc
+	upsertChartDocs  []Doc
+	upsertItemDocs   []Doc
 
 	deleteItemIDs []string
 	deleteDocs    []struct {
@@ -28,35 +26,35 @@ type mockWriter struct {
 	}
 }
 
-func (m *mockWriter) UpsertFolder(_ context.Context, _ string, doc bson.M) error {
+func (m *mockWriter) UpsertFolder(_ context.Context, _ string, doc Doc) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.upsertFolderDocs = append(m.upsertFolderDocs, cloneDoc(doc))
 	return nil
 }
 
-func (m *mockWriter) UpsertNote(_ context.Context, _ string, doc bson.M) error {
+func (m *mockWriter) UpsertNote(_ context.Context, _ string, doc Doc) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.upsertNoteDocs = append(m.upsertNoteDocs, cloneDoc(doc))
 	return nil
 }
 
-func (m *mockWriter) UpsertCard(_ context.Context, _ string, doc bson.M) error {
+func (m *mockWriter) UpsertCard(_ context.Context, _ string, doc Doc) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.upsertCardDocs = append(m.upsertCardDocs, cloneDoc(doc))
 	return nil
 }
 
-func (m *mockWriter) UpsertChart(_ context.Context, _ string, doc bson.M) error {
+func (m *mockWriter) UpsertChart(_ context.Context, _ string, doc Doc) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.upsertChartDocs = append(m.upsertChartDocs, cloneDoc(doc))
 	return nil
 }
 
-func (m *mockWriter) UpsertItem(_ context.Context, _ string, doc bson.M) error {
+func (m *mockWriter) UpsertItem(_ context.Context, _ string, doc Doc) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.upsertItemDocs = append(m.upsertItemDocs, cloneDoc(doc))
@@ -299,7 +297,7 @@ func TestE2E_CardChartRoundTrip(t *testing.T) {
 	for _, doc := range writer.upsertItemDocs {
 		itemType, _ := doc["itemType"].(string)
 		id, _ := doc["_id"].(string)
-		fields := toMap(doc["fields"])
+		fields := docToMap(doc["fields"])
 		if itemType == "CARD" && id == "c1" {
 			if got, _ := fields["fields"].(string); got == `{"status":"new"}` {
 				hasUpdatedCard = true
@@ -440,12 +438,12 @@ func toMovedEntries(moved []MovedFile) []mirror.MovedFileEntry {
 	return out
 }
 
-func cloneDoc(doc bson.M) bson.M {
+func cloneDoc(doc Doc) Doc {
 	raw, err := json.Marshal(doc)
 	if err != nil {
 		return doc
 	}
-	var cloned bson.M
+	var cloned Doc
 	if err := json.Unmarshal(raw, &cloned); err != nil {
 		return doc
 	}
@@ -454,10 +452,8 @@ func cloneDoc(doc bson.M) bson.M {
 
 func strPtr(s string) *string { return &s }
 
-func toMap(v interface{}) map[string]interface{} {
+func docToMap(v interface{}) map[string]interface{} {
 	switch m := v.(type) {
-	case bson.M:
-		return m
 	case map[string]interface{}:
 		return m
 	default:

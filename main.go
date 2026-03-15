@@ -34,19 +34,16 @@ func main() {
 	rdb := initRedis(cfg.RedisURI)
 	defer rdb.Close()
 
-	// Mongo reader（若連不上，降級為 no-op）
-	var dataReader vaultsync.DataReader = &noopDataReader{}
-	mongoReader, err := database.NewMongoReader(ctx, cfg.MongoURI, cfg.MongoDB)
+	// PostgreSQL
+	pgStore, err := database.NewPgStore(ctx, cfg.PostgresURI)
 	if err != nil {
-		log.Printf("Mongo 連線失敗，事件同步降級為 no-op: %v", err)
-	} else {
-		defer func() {
-			closeCtx, closeCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer closeCancel()
-			mongoReader.Close(closeCtx)
-		}()
-		dataReader = mongoReader
+		log.Fatalf("PostgreSQL 連線失敗: %v", err)
 	}
+	defer pgStore.Close()
+	pgStore.SetRedis(rdb)
+
+	// DataReader（由 PgStore 實作）
+	var dataReader vaultsync.DataReader = pgStore
 
 	// VaultFS（EFS 實作）
 	vaultFS := &mirror.RealVaultFS{Root: cfg.VaultRoot}
@@ -65,33 +62,18 @@ func main() {
 		vaultLock = executor.NewRedisVaultLock(rdb, lockTTL)
 	}
 
-	// Task executor（整合 Claude CLI + VaultFS + Vault Lock + MongoDB 回寫 + 衝突判定 + USN 遞增）
-	var dataWriter executor.DataWriter
-	var docUSNReader executor.USNReader
-	var usnInc executor.USNIncrementer
-	var usnSyncer executor.USNSyncer
-	var latUSN latestUSNReader
-	var fullExp vaultsync.FullExporter
-	if mongoReader != nil {
-		mongoReader.SetRedis(rdb)
-		dataWriter = mongoReader
-		docUSNReader = mongoReader
-		usnInc = mongoReader
-		usnSyncer = mongoReader
-		latUSN = mongoReader
-		fullExp = mongoReader
-	}
+	// Task executor（整合 Claude CLI + VaultFS + Vault Lock + PG 回寫 + 衝突判定 + 版本號遞增）
 	taskExec := &fullTaskExecutor{
 		claudeExec:   claudeExec,
 		vaultLock:    vaultLock,
 		vaultFS:      vaultFS,
 		vaultRoot:    cfg.VaultRoot,
-		writer:       dataWriter,
-		usnReader:    docUSNReader,
-		usnInc:       usnInc,
-		usnSyncer:    usnSyncer,
-		latestUSN:    latUSN,
-		fullExporter: fullExp,
+		writer:       pgStore,
+		usnReader:    pgStore,
+		usnInc:       pgStore,
+		usnSyncer:    pgStore,
+		latestUSN:    pgStore,
+		fullExporter: pgStore,
 		ctx:          ctx,
 	}
 	taskStore := selectTaskStore(api.NewMemoryTaskStore(), rdb, cfg.TaskTimeoutMinutes)
@@ -111,10 +93,9 @@ func main() {
 		Handler: mux,
 	}
 
-	// 背景工作使用 errgroup 管理，確保 graceful shutdown 時等待完成
 	g, gCtx := errgroup.WithContext(ctx)
 
-	// Redis Streams consumer（以 hostname 作為 consumer name，支援多實例部署）
+	// Redis Streams consumer
 	eventHandler := vaultsync.NewSyncEventHandler(vaultFS, dataReader)
 	eventHandler.SetLocker(vaultLock)
 	eventHandler.StartCacheEvictor(ctx)
@@ -128,32 +109,30 @@ func main() {
 		return nil
 	})
 
-	// USN poller 兜底（僅在 Mongo 可用時啟動）
-	if mongoReader != nil {
-		activeUsersFn := func() []string {
-			c, cancelFn := context.WithTimeout(context.Background(), 3*time.Second)
-			defer cancelFn()
-			users, err := mongoReader.ListActiveUsers(c)
-			if err != nil {
-				log.Printf("list active users failed: %v", err)
-				return []string{}
-			}
-			return users
+	// USN poller 兜底（使用 PgStore 的 sync_changes 查詢）
+	activeUsersFn := func() []string {
+		c, cancelFn := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancelFn()
+		users, err := pgStore.ListActiveUsers(c)
+		if err != nil {
+			log.Printf("list active users failed: %v", err)
+			return []string{}
 		}
-		poller := vaultsync.NewUSNPoller(
-			mongoReader,
-			eventHandler,
-			time.Duration(cfg.USNPollIntervalSec)*time.Second,
-			activeUsersFn,
-		)
-		taskExec.poller = poller
-		g.Go(func() error {
-			poller.Start(gCtx)
-			return nil
-		})
+		return users
 	}
+	poller := vaultsync.NewUSNPoller(
+		pgStore,
+		eventHandler,
+		time.Duration(cfg.USNPollIntervalSec)*time.Second,
+		activeUsersFn,
+	)
+	taskExec.poller = poller
+	g.Go(func() error {
+		poller.Start(gCtx)
+		return nil
+	})
 
-	// HTTP server（背景）
+	// HTTP server
 	g.Go(func() error {
 		log.Printf("HTTP server listening on :%s", cfg.Port)
 		if err := server.ListenAndServe(); err != http.ErrServerClosed {
@@ -201,7 +180,7 @@ func initRedis(uri string) *redis.Client {
 	return rdb
 }
 
-// latestUSNReader 查詢用戶最大 USN（衝突判定起始基準）
+// latestUSNReader 查詢用戶最大版本號（衝突判定起始基準）
 type latestUSNReader interface {
 	GetLatestUSN(ctx context.Context, userID string) (int, error)
 }
@@ -244,7 +223,7 @@ func (e *fullTaskExecutor) Execute(task *api.Task) error {
 		}
 	}
 
-	// 1. 記錄 AI 開始前的最大 USN（衝突判定用）
+	// 1. 記錄 AI 開始前的最大版本號（衝突判定用）
 	aiStartUSN := 0
 	if e.latestUSN != nil {
 		if usn, usnErr := e.latestUSN.GetLatestUSN(execCtx, task.UserID); usnErr == nil {
@@ -292,7 +271,7 @@ func (e *fullTaskExecutor) Execute(task *api.Task) error {
 		return fmt.Errorf("parse diff error: %w", parseErr)
 	}
 
-	// 6. 回寫 MongoDB（含 USN 衝突判定 + USN 遞增 + Deletion Log）
+	// 6. 回寫 PostgreSQL（含版本號衝突判定 + 版本號遞增 + sync_changes）
 	if e.writer != nil && len(entries) > 0 {
 		result := executor.WriteBack(execCtx, e.writer, e.usnReader, e.usnInc, task.UserID, entries, aiStartUSN)
 		log.Printf("[Task %s] writeback: created=%d updated=%d moved=%d deleted=%d skipped=%d errors=%d",
@@ -303,7 +282,7 @@ func (e *fullTaskExecutor) Execute(task *api.Task) error {
 			return fmt.Errorf("writeback failed: all %d entries had errors", result.Errors)
 		}
 
-		// 回寫完成後立即同步 USN 到 MongoDB，不依賴 golang_service 的 SyncWorker
+		// PG 模式下 SyncUserUSN 為 no-op，但保留呼叫以維持介面一致
 		if e.usnSyncer != nil {
 			if syncErr := e.usnSyncer.SyncUserUSN(execCtx, task.UserID); syncErr != nil {
 				log.Printf("[Task %s] SyncUserUSN error: %v", task.ID, syncErr)
@@ -335,7 +314,7 @@ func selectTaskStore(fallback api.TaskStore, rdb *redis.Client, taskTimeoutMinut
 	return fallback
 }
 
-// noopDataReader 用於 Mongo 不可用時的降級模式。
+// noopDataReader 用於降級模式。
 type noopDataReader struct{}
 
 func (n *noopDataReader) ListFolders(ctx context.Context, userID string) ([]*model.Folder, error) {

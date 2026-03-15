@@ -3,14 +3,12 @@ package executor
 import (
 	"testing"
 
-	"go.mongodb.org/mongo-driver/bson"
-
 	"github.com/urusaqqrun/vault-mirror-service/mirror"
 )
 
-func TestFolderMetaToItemBson_PreservesFolderItemType(t *testing.T) {
+func TestFolderMetaToItemDoc_PreservesFolderItemType(t *testing.T) {
 	noteType := "NOTE"
-	doc := folderMetaToItemBson(&mirror.FolderMeta{
+	doc := folderMetaToItemDoc(&mirror.FolderMeta{
 		ID:         "f1",
 		MemberID:   "u1",
 		FolderName: "資料夾",
@@ -22,8 +20,8 @@ func TestFolderMetaToItemBson_PreservesFolderItemType(t *testing.T) {
 	}
 }
 
-func TestFolderMetaToItemBson_InvalidTypeFallsBack(t *testing.T) {
-	doc := folderMetaToItemBson(&mirror.FolderMeta{
+func TestFolderMetaToItemDoc_InvalidTypeFallsBack(t *testing.T) {
+	doc := folderMetaToItemDoc(&mirror.FolderMeta{
 		ID:         "f1",
 		MemberID:   "u1",
 		FolderName: "資料夾",
@@ -34,16 +32,16 @@ func TestFolderMetaToItemBson_InvalidTypeFallsBack(t *testing.T) {
 	}
 }
 
-func TestChartAndCardLegacyBson_IncludeIsDeleted(t *testing.T) {
+func TestChartAndCardLegacyDoc_IncludeIsDeleted(t *testing.T) {
 	deleted := true
-	cardDoc := cardMetaToBson(&mirror.CardMeta{
+	cardDoc := cardMetaToDoc(&mirror.CardMeta{
 		ID:        "c1",
 		ParentID:  "p1",
 		Name:      "card",
 		USN:       1,
 		IsDeleted: deleted,
 	})
-	chartDoc := chartMetaToBson(&mirror.CardMeta{
+	chartDoc := chartMetaToDoc(&mirror.CardMeta{
 		ID:        "h1",
 		ParentID:  "p1",
 		Name:      "chart",
@@ -52,15 +50,15 @@ func TestChartAndCardLegacyBson_IncludeIsDeleted(t *testing.T) {
 	})
 
 	if got, _ := cardDoc["isDeleted"].(bool); !got {
-		t.Fatal("card bson should include isDeleted=true")
+		t.Fatal("card doc should include isDeleted=true")
 	}
 	if got, _ := chartDoc["isDeleted"].(bool); !got {
-		t.Fatal("chart bson should include isDeleted=true")
+		t.Fatal("chart doc should include isDeleted=true")
 	}
 }
 
 func TestEnsureDocID_CreateWithEmptyID(t *testing.T) {
-	doc := bson.M{"_id": "", "itemType": "NOTE"}
+	doc := Doc{"_id": "", "itemType": "NOTE"}
 	ensureDocID(doc, mirror.ImportActionCreate)
 	id, ok := doc["_id"].(string)
 	if !ok || id == "" {
@@ -72,7 +70,7 @@ func TestEnsureDocID_CreateWithEmptyID(t *testing.T) {
 }
 
 func TestEnsureDocID_CreateWithExistingID(t *testing.T) {
-	doc := bson.M{"_id": "existing-id", "itemType": "NOTE"}
+	doc := Doc{"_id": "existing-id", "itemType": "NOTE"}
 	ensureDocID(doc, mirror.ImportActionCreate)
 	if doc["_id"] != "existing-id" {
 		t.Fatalf("ensureDocID should not overwrite existing _id, got %q", doc["_id"])
@@ -80,23 +78,21 @@ func TestEnsureDocID_CreateWithExistingID(t *testing.T) {
 }
 
 func TestEnsureDocID_UpdateWithEmptyID(t *testing.T) {
-	doc := bson.M{"_id": "", "itemType": "NOTE"}
+	doc := Doc{"_id": "", "itemType": "NOTE"}
 	ensureDocID(doc, mirror.ImportActionUpdate)
 	if doc["_id"] != "" {
 		t.Fatal("ensureDocID should not generate _id for non-create actions")
 	}
 }
 
-// --- 新格式 itemDataToItemBson ---
-
-func TestItemDataToItemBson_BasicMapping(t *testing.T) {
+func TestItemDataToItemDoc_BasicMapping(t *testing.T) {
 	data := &mirror.ItemMirrorData{
 		ID:       "item1",
 		Name:     "測試",
 		ItemType: "KANBAN",
 		Fields:   map[string]interface{}{"color": "red", "size": float64(5)},
 	}
-	doc := itemDataToItemBson(data, 10)
+	doc := itemDataToItemDoc(data, 10)
 
 	if doc["_id"] != "item1" {
 		t.Errorf("_id: got %v", doc["_id"])
@@ -107,9 +103,9 @@ func TestItemDataToItemBson_BasicMapping(t *testing.T) {
 	if doc["itemType"] != "KANBAN" {
 		t.Errorf("itemType: got %v", doc["itemType"])
 	}
-	fields, ok := doc["fields"].(bson.M)
+	fields, ok := doc["fields"].(Doc)
 	if !ok {
-		t.Fatal("fields should be bson.M")
+		t.Fatal("fields should be Doc")
 	}
 	if fields["color"] != "red" {
 		t.Errorf("fields.color: got %v", fields["color"])
@@ -122,21 +118,21 @@ func TestItemDataToItemBson_BasicMapping(t *testing.T) {
 	}
 }
 
-func TestItemDataToItemBson_ZeroUSN_NotSet(t *testing.T) {
+func TestItemDataToItemDoc_ZeroUSN_NotSet(t *testing.T) {
 	data := &mirror.ItemMirrorData{
 		ID:       "item2",
 		Name:     "no-usn",
 		ItemType: "NOTE",
 		Fields:   map[string]interface{}{},
 	}
-	doc := itemDataToItemBson(data, 0)
-	fields := doc["fields"].(bson.M)
+	doc := itemDataToItemDoc(data, 0)
+	fields := doc["fields"].(Doc)
 	if _, ok := fields["usn"]; ok {
 		t.Error("usn should not be set when value is 0")
 	}
 }
 
-func TestItemDataToItemBson_DoesNotMutateOriginal(t *testing.T) {
+func TestItemDataToItemDoc_DoesNotMutateOriginal(t *testing.T) {
 	originalFields := map[string]interface{}{"key": "value"}
 	data := &mirror.ItemMirrorData{
 		ID:       "item3",
@@ -144,11 +140,11 @@ func TestItemDataToItemBson_DoesNotMutateOriginal(t *testing.T) {
 		ItemType: "NOTE",
 		Fields:   originalFields,
 	}
-	doc := itemDataToItemBson(data, 5)
-	fields := doc["fields"].(bson.M)
+	doc := itemDataToItemDoc(data, 5)
+	fields := doc["fields"].(Doc)
 	fields["injected"] = "bad"
 
 	if _, ok := originalFields["injected"]; ok {
-		t.Fatal("itemDataToItemBson should not share Fields map with original")
+		t.Fatal("itemDataToItemDoc should not share Fields map with original")
 	}
 }

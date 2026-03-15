@@ -2,6 +2,8 @@ package executor
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"strconv"
@@ -9,35 +11,36 @@ import (
 	"sync/atomic"
 	"time"
 
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/urusaqqrun/vault-mirror-service/mirror"
 )
 
-// DataWriter MongoDB 寫入能力（由 database.MongoReader 實作）
+// Doc 通用文件表示（取代 bson.M，不依賴 MongoDB driver）
+type Doc = map[string]interface{}
+
+// DataWriter 資料庫寫入能力（由 database 層實作）
 type DataWriter interface {
-	UpsertFolder(ctx context.Context, userID string, doc bson.M) error
-	UpsertNote(ctx context.Context, userID string, doc bson.M) error
-	UpsertCard(ctx context.Context, userID string, doc bson.M) error
-	UpsertChart(ctx context.Context, userID string, doc bson.M) error
-	UpsertItem(ctx context.Context, userID string, doc bson.M) error
+	UpsertFolder(ctx context.Context, userID string, doc Doc) error
+	UpsertNote(ctx context.Context, userID string, doc Doc) error
+	UpsertCard(ctx context.Context, userID string, doc Doc) error
+	UpsertChart(ctx context.Context, userID string, doc Doc) error
+	UpsertItem(ctx context.Context, userID string, doc Doc) error
 	DeleteItemDoc(ctx context.Context, userID, docID string, usn int) error
 	DeleteDocument(ctx context.Context, userID, collection, docID string, usn int) error
 }
 
-// USNReader 查詢文件當前 USN（衝突判定用）
+// USNReader 查詢文件當前版本號（衝突判定用）
 type USNReader interface {
 	GetDocUSN(ctx context.Context, userID, collection, docID string) (int, error)
 }
 
-// USNIncrementer 遞增用戶 USN（回寫時為每個文件取得新 USN）
+// USNIncrementer 遞增用戶版本號（回寫時為每個文件取得新版本）
 type USNIncrementer interface {
 	IncrementUSN(ctx context.Context, userID string) (int, error)
 }
 
-// USNSyncer 將 Redis 中的 USN 立即同步到 MongoDB（不依賴外部 SyncWorker）
+// USNSyncer 回寫完成後的清理動作（PostgreSQL 模式下為 no-op）
 type USNSyncer interface {
 	SyncUserUSN(ctx context.Context, userID string) error
 }
@@ -52,9 +55,7 @@ type WriteBackResult struct {
 	Errors  int
 }
 
-// WriteBack 將 ImportEntry 清單寫回 MongoDB，使用 errgroup 並行處理（上限 8）。
-// usnReader 為 nil 時跳過衝突判定（全部套用）。
-// usnInc 為 nil 時不遞增 USN（保留原始值）。
+// WriteBack 將 ImportEntry 清單寫回資料庫，使用 errgroup 並行處理（上限 8）。
 func WriteBack(ctx context.Context, writer DataWriter, usnReader USNReader, usnInc USNIncrementer, userID string, entries []mirror.ImportEntry, aiStartUSN int) WriteBackResult {
 	var created, updated, moved, deleted, skipped, errors int64
 
@@ -68,7 +69,6 @@ func WriteBack(ctx context.Context, writer DataWriter, usnReader USNReader, usnI
 				return nil
 			}
 
-			// 衝突判定
 			if usnReader != nil && e.Action != mirror.ImportActionCreate {
 				docID := resolveDocID(e)
 				if docID != "" {
@@ -87,7 +87,6 @@ func WriteBack(ctx context.Context, writer DataWriter, usnReader USNReader, usnI
 			var err error
 
 			if e.Action == mirror.ImportActionDelete {
-				// 刪除操作：USN 寫進 DeletionLog，必須先 INCR
 				delUSN := 0
 				if usnInc != nil {
 					usn, usnErr := usnInc.IncrementUSN(gCtx, userID)
@@ -103,7 +102,6 @@ func WriteBack(ctx context.Context, writer DataWriter, usnReader USNReader, usnI
 					atomic.AddInt64(&deleted, 1)
 				}
 			} else {
-				// 建立/更新/搬移：先 INCR USN，再帶著正確 USN 一次性 upsert，確保不會出現 USN=0 的幽靈文件
 				newUSN := 0
 				if usnInc != nil {
 					usn, usnErr := usnInc.IncrementUSN(gCtx, userID)
@@ -147,7 +145,6 @@ func WriteBack(ctx context.Context, writer DataWriter, usnReader USNReader, usnI
 	}
 }
 
-// resolveDocID 從 ImportEntry 取得文件 ID（用於衝突判定查詢）
 func resolveDocID(e mirror.ImportEntry) string {
 	if e.DocID != "" {
 		return e.DocID
@@ -190,7 +187,7 @@ func upsertEntry(ctx context.Context, w DataWriter, userID string, e mirror.Impo
 		if e.FolderMeta == nil {
 			return fmt.Errorf("folder meta is nil")
 		}
-		doc := folderMetaToBson(e.FolderMeta)
+		doc := folderMetaToDoc(e.FolderMeta)
 		if newUSN > 0 {
 			doc["usn"] = newUSN
 		}
@@ -200,7 +197,7 @@ func upsertEntry(ctx context.Context, w DataWriter, userID string, e mirror.Impo
 		if e.NoteMeta == nil {
 			return fmt.Errorf("note meta is nil")
 		}
-		doc := noteMetaToBson(e.NoteMeta, e.NoteBody)
+		doc := noteMetaToDoc(e.NoteMeta, e.NoteBody)
 		if newUSN > 0 {
 			doc["usn"] = newUSN
 		}
@@ -216,7 +213,7 @@ func upsertEntry(ctx context.Context, w DataWriter, userID string, e mirror.Impo
 		if e.CardMeta == nil {
 			return fmt.Errorf("card meta is nil")
 		}
-		doc := cardMetaToBson(e.CardMeta)
+		doc := cardMetaToDoc(e.CardMeta)
 		if newUSN > 0 {
 			doc["usn"] = newUSN
 		}
@@ -226,7 +223,7 @@ func upsertEntry(ctx context.Context, w DataWriter, userID string, e mirror.Impo
 		if e.CardMeta == nil {
 			return fmt.Errorf("chart meta is nil")
 		}
-		doc := chartMetaToBson(e.CardMeta)
+		doc := chartMetaToDoc(e.CardMeta)
 		if newUSN > 0 {
 			doc["usn"] = newUSN
 		}
@@ -237,18 +234,17 @@ func upsertEntry(ctx context.Context, w DataWriter, userID string, e mirror.Impo
 	}
 }
 
-// upsertItemEntry 將 meta 轉換為 Item collection 格式後 upsert
 func upsertItemEntry(ctx context.Context, w DataWriter, userID string, e mirror.ImportEntry, newUSN int) error {
-	var doc bson.M
+	var doc Doc
 	switch {
 	case e.ItemData != nil:
-		doc = itemDataToItemBson(e.ItemData, newUSN)
+		doc = itemDataToItemDoc(e.ItemData, newUSN)
 	case e.FolderMeta != nil:
-		doc = folderMetaToItemBson(e.FolderMeta, e.ItemType, newUSN)
+		doc = folderMetaToItemDoc(e.FolderMeta, e.ItemType, newUSN)
 	case e.NoteMeta != nil:
-		doc = noteMetaToItemBson(e.NoteMeta, e.NoteBody, newUSN)
+		doc = noteMetaToItemDoc(e.NoteMeta, e.NoteBody, newUSN)
 	case e.CardMeta != nil:
-		doc = cardMetaToItemBson(e.CardMeta, e.ItemType, newUSN)
+		doc = cardMetaToItemDoc(e.CardMeta, e.ItemType, newUSN)
 	default:
 		return fmt.Errorf("item entry has no meta data")
 	}
@@ -256,9 +252,8 @@ func upsertItemEntry(ctx context.Context, w DataWriter, userID string, e mirror.
 	return w.UpsertItem(ctx, userID, doc)
 }
 
-// folderMetaToItemBson 將 FolderMeta 轉為 Item collection 的 bson.M
-func folderMetaToItemBson(m *mirror.FolderMeta, itemType string, usn int) bson.M {
-	fields := bson.M{
+func folderMetaToItemDoc(m *mirror.FolderMeta, itemType string, usn int) Doc {
+	fields := Doc{
 		"memberID": m.MemberID,
 		"name":     m.FolderName,
 		"noteNum":  m.NoteNum,
@@ -330,7 +325,7 @@ func folderMetaToItemBson(m *mirror.FolderMeta, itemType string, usn int) bson.M
 	if m.ChartKind != nil {
 		fields["chartKind"] = *m.ChartKind
 	}
-	return bson.M{
+	return Doc{
 		"_id":      m.ID,
 		"itemType": normalizeFolderItemType(itemType),
 		"fields":   fields,
@@ -346,13 +341,12 @@ func normalizeFolderItemType(itemType string) string {
 	}
 }
 
-// noteMetaToItemBson 將 NoteMeta + body 轉為 Item collection 的 bson.M
-func noteMetaToItemBson(m *mirror.NoteMeta, body string, usn int) bson.M {
+func noteMetaToItemDoc(m *mirror.NoteMeta, body string, usn int) Doc {
 	itemType := "NOTE"
 	if m.Type == "TODO" {
 		itemType = "TODO"
 	}
-	fields := bson.M{
+	fields := Doc{
 		"title":     m.Title,
 		"name":      m.Title,
 		"parentID":  m.ParentID,
@@ -393,25 +387,24 @@ func noteMetaToItemBson(m *mirror.NoteMeta, body string, usn int) bson.M {
 	if body != "" {
 		html, err := mirror.MarkdownToHTML(body)
 		if err != nil {
-			log.Printf("[noteMetaToItemBson] MD→HTML conversion error: %v, using raw body", err)
+			log.Printf("[noteMetaToItemDoc] MD→HTML conversion error: %v, using raw body", err)
 			fields["content"] = body
 		} else {
 			fields["content"] = html
 		}
 	}
-	return bson.M{
+	return Doc{
 		"_id":      m.ID,
 		"itemType": itemType,
 		"fields":   fields,
 	}
 }
 
-// cardMetaToItemBson 將 CardMeta 轉為 Item collection 的 bson.M
-func cardMetaToItemBson(m *mirror.CardMeta, itemType string, usn int) bson.M {
+func cardMetaToItemDoc(m *mirror.CardMeta, itemType string, usn int) Doc {
 	if itemType == "" {
 		itemType = "CARD"
 	}
-	fields := bson.M{
+	fields := Doc{
 		"parentID": m.ParentID,
 		"name":     m.Name,
 	}
@@ -448,16 +441,15 @@ func cardMetaToItemBson(m *mirror.CardMeta, itemType string, usn int) bson.M {
 		fields["updatedAt"] = parseTimestamp(m.UpdatedAt)
 	}
 	fields["isDeleted"] = m.IsDeleted
-	return bson.M{
+	return Doc{
 		"_id":      m.ID,
 		"itemType": itemType,
 		"fields":   fields,
 	}
 }
 
-// itemDataToItemBson 將新格式 ItemMirrorData 轉為 Item collection 的 bson.M
-func itemDataToItemBson(d *mirror.ItemMirrorData, usn int) bson.M {
-	fields := bson.M{}
+func itemDataToItemDoc(d *mirror.ItemMirrorData, usn int) Doc {
+	fields := Doc{}
 	for k, v := range d.Fields {
 		fields[k] = v
 	}
@@ -465,29 +457,36 @@ func itemDataToItemBson(d *mirror.ItemMirrorData, usn int) bson.M {
 		fields["usn"] = usn
 	}
 	fields["updatedAt"] = time.Now().UnixMilli()
-	doc := bson.M{
+	return Doc{
 		"_id":      d.ID,
 		"name":     d.Name,
 		"itemType": d.ItemType,
 		"fields":   fields,
 	}
-	return doc
 }
 
-// ensureDocID 確保 BSON doc 有 _id；AI 新建的文件可能沒有 ID，自動生成 ObjectID
-func ensureDocID(doc bson.M, action mirror.ImportAction) {
+// ensureDocID 確保 doc 有 _id；AI 新建的文件可能沒有 ID，自動生成
+func ensureDocID(doc Doc, action mirror.ImportAction) {
 	if action != mirror.ImportActionCreate {
 		return
 	}
 	id, ok := doc["_id"].(string)
 	if !ok || id == "" {
-		newID := primitive.NewObjectID().Hex()
+		newID := generateID()
 		doc["_id"] = newID
 		log.Printf("[WriteBack] auto-generated _id=%s for new document", newID)
 	}
 }
 
-// parseTimestamp 嘗試將字串解析為 int64 毫秒時間戳，失敗時回傳原字串
+// generateID 產生 24 字元 hex ID（與 MongoDB ObjectID 格式相容）
+func generateID() string {
+	b := make([]byte, 12)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("%x", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b)
+}
+
 func parseTimestamp(s string) interface{} {
 	if v, err := strconv.ParseInt(s, 10, 64); err == nil {
 		return v
@@ -535,8 +534,8 @@ func deleteEntry(ctx context.Context, w DataWriter, userID string, e mirror.Impo
 	return w.DeleteDocument(ctx, userID, e.Collection, docID, usn)
 }
 
-func folderMetaToBson(m *mirror.FolderMeta) bson.M {
-	doc := bson.M{
+func folderMetaToDoc(m *mirror.FolderMeta) Doc {
+	doc := Doc{
 		"_id":        m.ID,
 		"folderName": m.FolderName,
 		"usn":        m.USN,
@@ -607,12 +606,12 @@ func folderMetaToBson(m *mirror.FolderMeta) bson.M {
 	return doc
 }
 
-func noteMetaToBson(m *mirror.NoteMeta, body string) bson.M {
+func noteMetaToDoc(m *mirror.NoteMeta, body string) Doc {
 	tags := m.Tags
 	if tags == nil {
 		tags = []string{}
 	}
-	doc := bson.M{
+	doc := Doc{
 		"_id":      m.ID,
 		"title":    m.Title,
 		"parentID": m.ParentID,
@@ -650,7 +649,7 @@ func noteMetaToBson(m *mirror.NoteMeta, body string) bson.M {
 	if body != "" {
 		html, err := mirror.MarkdownToHTML(body)
 		if err != nil {
-			log.Printf("[noteMetaToBson] MD→HTML conversion error: %v, using raw body", err)
+			log.Printf("[noteMetaToDoc] MD→HTML conversion error: %v, using raw body", err)
 			doc["content"] = body
 		} else {
 			doc["content"] = html
@@ -659,8 +658,8 @@ func noteMetaToBson(m *mirror.NoteMeta, body string) bson.M {
 	return doc
 }
 
-func cardMetaToBson(m *mirror.CardMeta) bson.M {
-	doc := bson.M{
+func cardMetaToDoc(m *mirror.CardMeta) Doc {
+	doc := Doc{
 		"_id":       m.ID,
 		"parentID":  m.ParentID,
 		"name":      m.Name,
@@ -691,9 +690,8 @@ func cardMetaToBson(m *mirror.CardMeta) bson.M {
 	return doc
 }
 
-// chartMetaToBson Chart 專用：CardMeta.Fields 映射到 MongoDB 的 data 欄位（而非 fields）
-func chartMetaToBson(m *mirror.CardMeta) bson.M {
-	doc := bson.M{
+func chartMetaToDoc(m *mirror.CardMeta) Doc {
+	doc := Doc{
 		"_id":       m.ID,
 		"parentID":  m.ParentID,
 		"name":      m.Name,
@@ -715,8 +713,6 @@ func chartMetaToBson(m *mirror.CardMeta) bson.M {
 	return doc
 }
 
-// parentFolderFromPath 從 Vault 相對路徑推導父目錄 ID（需要事先建立路徑→ID 映射）
-// 目前回傳空字串，由 NoteMeta.ParentID 欄位提供
 func parentFolderFromPath(path string) string {
 	_ = strings.Split(path, "/")
 	return ""
