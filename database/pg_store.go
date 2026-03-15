@@ -394,20 +394,27 @@ func (s *PgStore) getMaxVersionFromPG(ctx context.Context, userID string) int {
 }
 
 func (s *PgStore) incrementUSNViaPG(ctx context.Context, userID string) (int, error) {
-	// 使用交易 + SELECT FOR UPDATE 風格的 advisory lock 確保原子遞增
+	// 使用 pg_advisory_xact_lock 確保同一用戶的 USN 遞增是原子的
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, fmt.Errorf("begin tx for USN incr: %w", err)
 	}
 	defer tx.Rollback()
 
+	// 以 userID 的 hash 作為 advisory lock key，確保同一用戶串行化
+	_, err = tx.ExecContext(ctx,
+		`SELECT pg_advisory_xact_lock(hashtext($1))`, userID)
+	if err != nil {
+		return 0, fmt.Errorf("advisory lock: %w", err)
+	}
+
 	var maxVer sql.NullInt64
 	err = tx.QueryRowContext(ctx,
-		`SELECT COALESCE(MAX(version), 0) FROM base_items WHERE owner_id = $1 FOR UPDATE`,
+		`SELECT COALESCE(MAX(version), 0) FROM base_items WHERE owner_id = $1`,
 		userID,
 	).Scan(&maxVer)
 	if err != nil {
-		return 0, fmt.Errorf("select max version for update: %w", err)
+		return 0, fmt.Errorf("select max version: %w", err)
 	}
 
 	newVer := 1
