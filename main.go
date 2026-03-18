@@ -245,7 +245,7 @@ func (e *fullTaskExecutor) Execute(task *api.Task) error {
 	}
 
 	// 3. 執行 Claude CLI
-	output, err := e.claudeExec.ExecuteTask(execCtx, task.ID, workDir, task.Instruction)
+	output, err := e.claudeExec.ExecuteTask(execCtx, task.ID, workDir, task.Instruction, task.Scope, task.UserID)
 	if err != nil {
 		return err
 	}

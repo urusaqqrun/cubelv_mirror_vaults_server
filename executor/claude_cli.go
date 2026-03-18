@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -34,8 +35,8 @@ func NewClaudeExecutor(maxConcurrent int, timeout time.Duration, vaultRoot strin
 }
 
 // ExecuteTask 啟動 Claude CLI 執行任務
-// workDir 為用戶的 Vault 目錄路徑
-func (e *ClaudeExecutor) ExecuteTask(ctx context.Context, taskID, workDir, instruction string) (string, error) {
+// workDir 為用戶的 Vault 目錄路徑，scope 和 userID 會注入環境變數供 hooks 使用
+func (e *ClaudeExecutor) ExecuteTask(ctx context.Context, taskID, workDir, instruction, scope, userID string) (string, error) {
 	// 等待 semaphore（並發排隊）
 	select {
 	case e.sem <- struct{}{}:
@@ -65,6 +66,10 @@ func (e *ClaudeExecutor) ExecuteTask(ctx context.Context, taskID, workDir, instr
 
 	cmd := exec.CommandContext(execCtx, "claude", args...)
 	cmd.Dir = workDir
+	cmd.Env = append(os.Environ(),
+		"TASK_SCOPE="+scope,
+		"VAULT_USER_ID="+userID,
+	)
 
 	e.mu.Lock()
 	e.processes[taskID] = cmd

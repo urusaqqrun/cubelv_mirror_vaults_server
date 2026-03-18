@@ -60,7 +60,7 @@ func TestClaudeExecutor_SemaphoreBlocking(t *testing.T) {
 		defer cancel()
 
 		atomic.AddInt32(&running, 1)
-		_, err := exec.ExecuteTask(ctx, "blocked-task", "/tmp", "test")
+		_, err := exec.ExecuteTask(ctx, "blocked-task", "/tmp", "test", "", "")
 		atomic.AddInt32(&running, -1)
 
 		if err == nil {

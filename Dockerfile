@@ -19,7 +19,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o vault-mirror-service ./mai
 FROM debian:bullseye-slim
 
 RUN apt-get update && \
-    apt-get install -y ca-certificates tzdata bash curl netcat-openbsd && \
+    apt-get install -y ca-certificates tzdata bash curl netcat-openbsd jq findutils && \
     rm -rf /var/lib/apt/lists/*
 
 # 建立非 root 使用者（Claude CLI 拒絕以 root + --dangerously-skip-permissions 運行）
@@ -37,6 +37,14 @@ WORKDIR /app
 COPY --from=builder /app/vault-mirror-service /app/vault-mirror-service
 COPY ./config/ /app/config/
 COPY ./entrypoint.sh /app/
+
+# Claude CLI hooks 設定
+RUN mkdir -p /home/mirror/.claude && \
+    cp /app/config/claude-hooks-settings.json /home/mirror/.claude/settings.json && \
+    echo '# clean bashrc for hook compatibility' > /home/mirror/.bashrc && \
+    chmod +x /app/config/hooks/*.sh && \
+    chown -R mirror:mirror /home/mirror/.claude /home/mirror/.bashrc
+
 RUN chmod +x /app/entrypoint.sh && \
     chown -R mirror:mirror /app
 
