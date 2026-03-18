@@ -28,8 +28,8 @@ for pattern in "${DANGEROUS_PATTERNS[@]}"; do
 done
 
 # 規則 2：禁止寫入 shared 目錄（唯讀區域）
-# 使用 $VAULT_ROOT 環境變數（預設 /vaults），避免硬編碼路徑
-VR="${VAULT_ROOT:-/vaults}"
+# 使用 $VAULT_ROOT 環境變數，避免硬編碼路徑
+VR="$VAULT_ROOT"
 if echo "$COMMAND" | grep -qE "(>|>>|tee|cp |mv |rm ).*${VR}/shared/"; then
   echo "阻擋：${VR}/shared/ 是唯讀目錄，禁止寫入" >&2
   exit 2
