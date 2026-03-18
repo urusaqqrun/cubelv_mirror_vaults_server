@@ -27,15 +27,17 @@ for pattern in "${DANGEROUS_PATTERNS[@]}"; do
   fi
 done
 
-# 規則 2：禁止寫入 /vault/shared/（唯讀區域）
-if echo "$COMMAND" | grep -qE "(>|>>|tee|cp |mv |rm ).*/vault/shared/"; then
-  echo "阻擋：/vault/shared/ 是唯讀目錄，禁止寫入" >&2
+# 規則 2：禁止寫入 shared 目錄（唯讀區域）
+# 使用 $VAULT_ROOT 環境變數（預設 /vaults），避免硬編碼路徑
+VR="${VAULT_ROOT:-/vaults}"
+if echo "$COMMAND" | grep -qE "(>|>>|tee|cp |mv |rm ).*${VR}/shared/"; then
+  echo "阻擋：${VR}/shared/ 是唯讀目錄，禁止寫入" >&2
   exit 2
 fi
 
 # 規則 3：禁止存取其他用戶的 vault 目錄
 if [ -n "$VAULT_USER_ID" ]; then
-  if echo "$COMMAND" | grep -oE "/vault/[a-zA-Z0-9_-]+/" | grep -v "/vault/$VAULT_USER_ID/" | grep -qv "/vault/shared/"; then
+  if echo "$COMMAND" | grep -oE "${VR}/[a-zA-Z0-9_-]+/" | grep -v "${VR}/$VAULT_USER_ID/" | grep -qv "${VR}/shared/"; then
     echo "阻擋：禁止存取其他用戶的 vault 目錄" >&2
     exit 2
   fi

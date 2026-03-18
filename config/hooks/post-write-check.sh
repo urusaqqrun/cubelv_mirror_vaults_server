@@ -41,10 +41,13 @@ fi
 if [[ "$FILE_PATH" == */_folder.json ]] && [ -f "$FULL_PATH" ]; then
   HAS_ID=$(jq -r '.ID // empty' "$FULL_PATH" 2>/dev/null)
   HAS_MEMBER=$(jq -r '.memberID // empty' "$FULL_PATH" 2>/dev/null)
-  if [ -z "$HAS_ID" ]; then
-    jq -n '{
+  if [ -z "$HAS_ID" ] || [ -z "$HAS_MEMBER" ]; then
+    MISSING=""
+    [ -z "$HAS_ID" ] && MISSING="ID"
+    [ -z "$HAS_MEMBER" ] && MISSING="${MISSING:+$MISSING、}memberID"
+    jq -n --arg missing "$MISSING" '{
       decision: "block",
-      reason: "_folder.json 缺少 ID 欄位。請確保保留原始的 ID 和 memberID 欄位。"
+      reason: ("_folder.json 缺少 " + $missing + " 欄位。請確保保留原始的 ID 和 memberID 欄位。")
     }'
     exit 0
   fi
