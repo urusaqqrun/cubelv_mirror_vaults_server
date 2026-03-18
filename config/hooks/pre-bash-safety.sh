@@ -35,7 +35,7 @@ fi
 
 # 規則 3：禁止存取其他用戶的 vault 目錄
 if [ -n "$VAULT_USER_ID" ]; then
-  if echo "$COMMAND" | grep -qE "/vault/[a-zA-Z0-9_-]+/" | grep -v "/vault/$VAULT_USER_ID/" | grep -v "/vault/shared/"; then
+  if echo "$COMMAND" | grep -oE "/vault/[a-zA-Z0-9_-]+/" | grep -v "/vault/$VAULT_USER_ID/" | grep -qv "/vault/shared/"; then
     echo "阻擋：禁止存取其他用戶的 vault 目錄" >&2
     exit 2
   fi

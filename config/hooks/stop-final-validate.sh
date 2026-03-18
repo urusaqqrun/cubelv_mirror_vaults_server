@@ -26,11 +26,18 @@ fi
 
 # vault scope：全面檢查
 ERRORS=""
+CHECKED_PARENTS=""
 
 # 檢查 1：Folder 不能同時包含 folder 和 note
 while IFS= read -r folder_json; do
   DIR=$(dirname "$folder_json")
   PARENT=$(dirname "$DIR")
+
+  # 跳過已檢查的目錄，避免重複報錯
+  case "$CHECKED_PARENTS" in
+    *"|$PARENT|"*) continue ;;
+  esac
+  CHECKED_PARENTS="${CHECKED_PARENTS}|$PARENT|"
 
   MD_COUNT=$(find "$PARENT" -maxdepth 1 -name "*.md" 2>/dev/null | wc -l)
   SUBFOLDER_COUNT=$(find "$PARENT" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l)
