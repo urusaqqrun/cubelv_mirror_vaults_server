@@ -20,6 +20,16 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "matcher": "Read|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/app/config/hooks/pre-read-edit-validate.sh",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "PostToolUse": [
