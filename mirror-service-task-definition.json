@@ -52,6 +52,22 @@
                 {
                     "name": "VAULT_ROOT",
                     "value": "/vaults"
+                },
+                {
+                    "name": "SYNC_LOOP_INTERVAL_SEC",
+                    "value": "30"
+                },
+                {
+                    "name": "SYNC_CURSOR_LEASE_SEC",
+                    "value": "120"
+                },
+                {
+                    "name": "SYNC_OWNER_SCAN_LIMIT",
+                    "value": "128"
+                },
+                {
+                    "name": "SYNC_CHANGE_BATCH_SIZE",
+                    "value": "100"
                 }
             ],
             "secrets": [

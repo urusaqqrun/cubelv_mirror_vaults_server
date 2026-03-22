@@ -14,7 +14,6 @@ import (
 
 	"github.com/urusaqqrun/vault-mirror-service/executor"
 	"github.com/urusaqqrun/vault-mirror-service/model"
-	vaultsync "github.com/urusaqqrun/vault-mirror-service/sync"
 )
 
 // PgStore PostgreSQL 資料存取層
@@ -38,7 +37,12 @@ func NewPgStore(ctx context.Context, pgURI string) (*PgStore, error) {
 		return nil, fmt.Errorf("ping postgres: %w", err)
 	}
 	log.Println("vault-mirror-service: PostgreSQL connected")
-	return &PgStore{db: db}, nil
+	store := &PgStore{db: db}
+	if err := store.ensureMirrorSchema(ctx); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return store, nil
 }
 
 func (s *PgStore) SetRedis(rdb *redis.Client) { s.rdb = rdb }
@@ -239,8 +243,8 @@ func (s *PgStore) UpsertItem(ctx context.Context, userID string, doc executor.Do
 	}
 
 	_, err = tx.ExecContext(ctx,
-		`INSERT INTO sync_changes (item_id, item_version, change_type, actor_id, actor_name, created_at)
-		 VALUES ($1, $2, 'updated', $3, 'mirror-service', $4)`,
+		`INSERT INTO sync_changes (item_id, item_version, change_type, actor_id, details, created_at)
+		 VALUES ($1, $2, 'updated', $3, 'mirror-service writeback', $4)`,
 		id, version, userID, now,
 	)
 	if err != nil {
@@ -312,8 +316,8 @@ func (s *PgStore) DeleteItemDoc(ctx context.Context, userID, docID string, versi
 	affected, _ := result.RowsAffected()
 	if affected > 0 {
 		_, err = tx.ExecContext(ctx,
-			`INSERT INTO sync_changes (item_id, item_version, change_type, actor_id, actor_name, created_at)
-			 VALUES ($1, $2, 'deleted', $3, 'mirror-service', $4)`,
+			`INSERT INTO sync_changes (item_id, item_version, change_type, actor_id, details, created_at)
+			 VALUES ($1, $2, 'deleted', $3, 'mirror-service writeback', $4)`,
 			docID, version, userID, now,
 		)
 		if err != nil {
@@ -479,10 +483,10 @@ func (s *PgStore) GetLatestUSN(ctx context.Context, userID string) (int, error) 
 }
 
 // ---------------------------------------------------------------------------
-// SeqReader 介面（任務回寫後推進 Poller 游標用）
+// SeqReader 介面（同步 worker 初始化 cursor 用）
 // ---------------------------------------------------------------------------
 
-// GetLatestSeq 取得該用戶在 sync_changes 中的最大 seq（Poller 追蹤的游標）
+// GetLatestSeq 取得該用戶在 sync_changes 中的最大 seq。
 func (s *PgStore) GetLatestSeq(ctx context.Context, userID string) (int, error) {
 	var maxSeq sql.NullInt64
 	err := s.db.QueryRowContext(ctx,
@@ -499,76 +503,6 @@ func (s *PgStore) GetLatestSeq(ctx context.Context, userID string) (int, error) 
 		return 0, nil
 	}
 	return int(maxSeq.Int64), nil
-}
-
-// ---------------------------------------------------------------------------
-// USNQuerier 介面（usn_poller 使用，改為從 sync_changes 查詢）
-// ---------------------------------------------------------------------------
-
-func (s *PgStore) GetChangesAfterUSN(ctx context.Context, userID string, afterUSN int) ([]vaultsync.SyncEvent, error) {
-	// afterUSN 在 PG 模式下對應 seq
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT sc.seq, sc.item_id, sc.change_type
-		 FROM sync_changes sc
-		 JOIN base_items bi ON bi.id = sc.item_id
-		 JOIN item_permissions ip ON ip.item_id = bi.id AND ip.permission = 'owner'
-		 WHERE sc.seq > $1 AND ip.user_id = $2
-		 ORDER BY sc.seq ASC
-		 LIMIT 100`,
-		afterUSN, userID,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	ts := time.Now().UnixMilli()
-	var events []vaultsync.SyncEvent
-	for rows.Next() {
-		var seq int64
-		var itemID, changeType string
-		if err := rows.Scan(&seq, &itemID, &changeType); err != nil {
-			log.Printf("[GetChangesAfterUSN] scan error: %v", err)
-			continue
-		}
-		action := "update"
-		if changeType == "deleted" {
-			action = "delete"
-		}
-		events = append(events, vaultsync.SyncEvent{
-			Collection: "item",
-			UserID:     userID,
-			DocID:      itemID,
-			Action:     action,
-			Timestamp:  ts,
-			USN:        int(seq),
-		})
-	}
-	return events, rows.Err()
-}
-
-// ListActiveUsers 從 base_items 查詢最近 7 天有更新的用戶
-func (s *PgStore) ListActiveUsers(ctx context.Context) ([]string, error) {
-	sevenDaysAgoMs := time.Now().AddDate(0, 0, -7).UnixMilli()
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT DISTINCT ip.user_id FROM base_items bi
-		 JOIN item_permissions ip ON ip.item_id = bi.id AND ip.permission = 'owner'
-		 WHERE bi.updated_at > $1`,
-		sevenDaysAgoMs,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var users []string
-	for rows.Next() {
-		var uid string
-		if err := rows.Scan(&uid); err == nil && uid != "" {
-			users = append(users, uid)
-		}
-	}
-	return users, rows.Err()
 }
 
 // ---------------------------------------------------------------------------
@@ -675,26 +609,26 @@ func itemToFolder(item *model.Item) *model.Folder {
 
 func itemToNote(item *model.Item) *model.Note {
 	n := &model.Note{
-		ID:    item.ID,
-		Title: model.StrPtrField(item.Fields, "title"),
-		Content:  model.StrPtrField(item.Fields, "content"),
-		Tags:     model.StringSliceField(item.Fields, "tags"),
+		ID:      item.ID,
+		Title:   model.StrPtrField(item.Fields, "title"),
+		Content: model.StrPtrField(item.Fields, "content"),
+		Tags:    model.StringSliceField(item.Fields, "tags"),
 		FolderID: func() string {
 			if v := model.StrPtrField(item.Fields, "folderID"); v != nil {
 				return *v
 			}
 			return ""
 		}(),
-		ParentID:  model.StrPtrField(item.Fields, "parentID"),
-		Usn:       item.GetUSN(),
-		CreateAt:  model.Int64Field(item.Fields, "createdAt"),
-		UpdateAt:  model.Int64Field(item.Fields, "updatedAt"),
-		OrderAt:   model.StrPtrField(item.Fields, "orderAt"),
-		Status:    model.StrPtrField(item.Fields, "status"),
-		AiTitle:   model.StrPtrField(item.Fields, "aiTitle"),
-		AiTags:    model.StringSliceField(item.Fields, "aiTags"),
-		ImgURLs:   model.StringSliceField(item.Fields, "imgURLs"),
-		IsNew:     model.BoolField(item.Fields, "isNew"),
+		ParentID: model.StrPtrField(item.Fields, "parentID"),
+		Usn:      item.GetUSN(),
+		CreateAt: model.Int64Field(item.Fields, "createdAt"),
+		UpdateAt: model.Int64Field(item.Fields, "updatedAt"),
+		OrderAt:  model.StrPtrField(item.Fields, "orderAt"),
+		Status:   model.StrPtrField(item.Fields, "status"),
+		AiTitle:  model.StrPtrField(item.Fields, "aiTitle"),
+		AiTags:   model.StringSliceField(item.Fields, "aiTags"),
+		ImgURLs:  model.StringSliceField(item.Fields, "imgURLs"),
+		IsNew:    model.BoolField(item.Fields, "isNew"),
 	}
 	if t := model.StrPtrField(item.Fields, "_type"); t != nil {
 		n.Type = *t
@@ -706,8 +640,14 @@ func itemToNote(item *model.Item) *model.Note {
 
 func itemToCard(item *model.Item) *model.Card {
 	return &model.Card{
-		ID:       item.ID,
-		ParentID: func() string { v := model.StrPtrField(item.Fields, "parentID"); if v != nil { return *v }; return "" }(),
+		ID: item.ID,
+		ParentID: func() string {
+			v := model.StrPtrField(item.Fields, "parentID")
+			if v != nil {
+				return *v
+			}
+			return ""
+		}(),
 		Name:      item.GetName(),
 		Fields:    model.StrPtrField(item.Fields, "fields"),
 		Reviews:   model.StrPtrField(item.Fields, "reviews"),
@@ -721,8 +661,14 @@ func itemToCard(item *model.Item) *model.Card {
 
 func itemToChart(item *model.Item) *model.Chart {
 	return &model.Chart{
-		ID:       item.ID,
-		ParentID: func() string { v := model.StrPtrField(item.Fields, "parentID"); if v != nil { return *v }; return "" }(),
+		ID: item.ID,
+		ParentID: func() string {
+			v := model.StrPtrField(item.Fields, "parentID")
+			if v != nil {
+				return *v
+			}
+			return ""
+		}(),
 		Name:      item.GetName(),
 		Data:      model.StrPtrField(item.Fields, "data"),
 		IsDeleted: model.BoolField(item.Fields, "isDeleted"),

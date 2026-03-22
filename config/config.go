@@ -3,9 +3,9 @@ package config
 import "os"
 
 type Config struct {
-	PostgresURI string
-	RedisURI    string
-	VaultRoot   string
+	PostgresURI  string
+	RedisURI     string
+	VaultRoot    string
 	AnthropicKey string
 	Port         string
 
@@ -13,20 +13,26 @@ type Config struct {
 	MaxConcurrentTasks int
 	TaskTimeoutMinutes int
 
-	// USN 輪詢
-	USNPollIntervalSec int
+	// 同步 worker
+	SyncLoopIntervalSec int
+	SyncCursorLeaseSec  int
+	SyncOwnerScanLimit  int
+	SyncChangeBatchSize int
 }
 
 func Load() *Config {
 	return &Config{
-		PostgresURI:        getEnv("POSTGRES_URI", ""),
-		RedisURI:           getEnv("REDIS_URI", "localhost:6379"),
-		VaultRoot:          getEnv("VAULT_ROOT", "/vaults"),
-		AnthropicKey:       getEnv("ANTHROPIC_API_KEY", ""),
-		Port:               getEnv("PORT", "8080"),
-		MaxConcurrentTasks: getEnvInt("MAX_CONCURRENT_TASKS", 3),
-		TaskTimeoutMinutes: getEnvInt("TASK_TIMEOUT_MINUTES", 10),
-		USNPollIntervalSec: getEnvInt("USN_POLL_INTERVAL_SEC", 30),
+		PostgresURI:         getEnv("POSTGRES_URI", ""),
+		RedisURI:            getEnv("REDIS_URI", "localhost:6379"),
+		VaultRoot:           getEnv("VAULT_ROOT", "/vaults"),
+		AnthropicKey:        getEnv("ANTHROPIC_API_KEY", ""),
+		Port:                getEnv("PORT", "8080"),
+		MaxConcurrentTasks:  getEnvInt("MAX_CONCURRENT_TASKS", 3),
+		TaskTimeoutMinutes:  getEnvInt("TASK_TIMEOUT_MINUTES", 10),
+		SyncLoopIntervalSec: getEnvInt("SYNC_LOOP_INTERVAL_SEC", 30),
+		SyncCursorLeaseSec:  getEnvInt("SYNC_CURSOR_LEASE_SEC", 120),
+		SyncOwnerScanLimit:  getEnvInt("SYNC_OWNER_SCAN_LIMIT", 128),
+		SyncChangeBatchSize: getEnvInt("SYNC_CHANGE_BATCH_SIZE", 100),
 	}
 }
 

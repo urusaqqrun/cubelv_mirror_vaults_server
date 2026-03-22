@@ -15,6 +15,7 @@ type mockDataReader struct {
 	notes   map[string]*model.Note
 	cards   map[string]*model.Card
 	charts  map[string]*model.Chart
+	items   map[string]*model.Item
 }
 
 func (m *mockDataReader) ListFolders(_ context.Context, _ string) ([]*model.Folder, error) {
@@ -36,8 +37,8 @@ func (m *mockDataReader) GetCard(_ context.Context, _ string, id string) (*model
 func (m *mockDataReader) GetChart(_ context.Context, _ string, id string) (*model.Chart, error) {
 	return m.charts[id], nil
 }
-func (m *mockDataReader) GetItem(_ context.Context, _ string, _ string) (*model.Item, error) {
-	return nil, nil
+func (m *mockDataReader) GetItem(_ context.Context, _ string, id string) (*model.Item, error) {
+	return m.items[id], nil
 }
 func (m *mockDataReader) ListItemFolders(_ context.Context, _ string) ([]*model.Item, error) {
 	items := make([]*model.Item, 0, len(m.folders))
@@ -77,6 +78,7 @@ func TestEventPipeline_NoteCreate_ExportsMarkdown(t *testing.T) {
 		},
 		cards:  map[string]*model.Card{},
 		charts: map[string]*model.Chart{},
+		items:  map[string]*model.Item{},
 	}
 
 	h := NewSyncEventHandler(fs, reader)
@@ -102,7 +104,7 @@ func TestEventPipeline_FolderUpdate_ExportsFolderJSON(t *testing.T) {
 			"f1": {ID: "f1", FolderName: "工作", Type: &noteType, Usn: 2},
 		},
 		notes: map[string]*model.Note{},
-		cards: map[string]*model.Card{}, charts: map[string]*model.Chart{},
+		cards: map[string]*model.Card{}, charts: map[string]*model.Chart{}, items: map[string]*model.Item{},
 	}
 
 	h := NewSyncEventHandler(fs, reader)
@@ -120,7 +122,7 @@ func TestEventPipeline_NoteDelete_RemovesFileByDocID(t *testing.T) {
 	md := "---\nid: n1\nparentID: f1\ntitle: test\nusn: 1\nhtmlHash: h\ncreatedAt: \"1\"\nupdatedAt: \"1\"\n---\ncontent"
 	_ = fs.WriteFile("u1/NOTE/工作/test.md", []byte(md))
 
-	reader := &mockDataReader{folders: map[string]*model.Folder{}, notes: map[string]*model.Note{}, cards: map[string]*model.Card{}, charts: map[string]*model.Chart{}}
+	reader := &mockDataReader{folders: map[string]*model.Folder{}, notes: map[string]*model.Note{}, cards: map[string]*model.Card{}, charts: map[string]*model.Chart{}, items: map[string]*model.Item{}}
 	h := NewSyncEventHandler(fs, reader)
 	err := h.HandleEvent(context.Background(), SyncEvent{Collection: "note", UserID: "u1", DocID: "n1", Action: "delete"})
 	if err != nil {
@@ -147,6 +149,7 @@ func TestHandleEvent_VaultLocked_ReturnsError(t *testing.T) {
 		notes:   map[string]*model.Note{},
 		cards:   map[string]*model.Card{},
 		charts:  map[string]*model.Chart{},
+		items:   map[string]*model.Item{},
 	}
 	h := NewSyncEventHandler(fs, reader)
 
@@ -182,7 +185,7 @@ func TestHandleEvent_VaultUnlocked_ProcessesNormally(t *testing.T) {
 		notes: map[string]*model.Note{
 			"n1": {ID: "n1", Title: &title, Content: &content, FolderID: "f1", Usn: 1, CreateAt: 1, UpdateAt: 2},
 		},
-		cards: map[string]*model.Card{}, charts: map[string]*model.Chart{},
+		cards: map[string]*model.Card{}, charts: map[string]*model.Chart{}, items: map[string]*model.Item{},
 	}
 	h := NewSyncEventHandler(fs, reader)
 
@@ -237,7 +240,7 @@ func TestResolverCache_ReducesListFoldersCalls(t *testing.T) {
 				"n1": {ID: "n1", Title: &title1, Content: &content, FolderID: "f1", Usn: 1, CreateAt: 1, UpdateAt: 2},
 				"n2": {ID: "n2", Title: &title2, Content: &content, FolderID: "f1", Usn: 2, CreateAt: 1, UpdateAt: 2},
 			},
-			cards: map[string]*model.Card{}, charts: map[string]*model.Chart{},
+			cards: map[string]*model.Card{}, charts: map[string]*model.Chart{}, items: map[string]*model.Item{},
 		},
 	}
 
@@ -275,7 +278,7 @@ func TestResolverCache_InvalidatedOnFolderEvent(t *testing.T) {
 			notes: map[string]*model.Note{
 				"n1": {ID: "n1", Title: &title, Content: &content, FolderID: "f1", Usn: 1, CreateAt: 1, UpdateAt: 2},
 			},
-			cards: map[string]*model.Card{}, charts: map[string]*model.Chart{},
+			cards: map[string]*model.Card{}, charts: map[string]*model.Chart{}, items: map[string]*model.Item{},
 		},
 	}
 
@@ -318,6 +321,7 @@ func TestEventPipeline_CardCreate_ExportsCardJSON(t *testing.T) {
 			"card1": {ID: "card1", ParentID: "c1", Name: "卡片一", Fields: &fields, Usn: 1},
 		},
 		charts: map[string]*model.Chart{},
+		items:  map[string]*model.Item{},
 	}
 
 	h := NewSyncEventHandler(fs, reader)
@@ -327,5 +331,66 @@ func TestEventPipeline_CardCreate_ExportsCardJSON(t *testing.T) {
 	}
 	if !fs.Exists("u1/CARD/卡片夾/卡片一.json") {
 		t.Fatal("expected card json to be exported")
+	}
+}
+
+func TestEventPipeline_ItemUpdate_ExportsItemJSON(t *testing.T) {
+	fs := mirror.NewMemoryVaultFS()
+	noteType := "NOTE"
+	reader := &mockDataReader{
+		folders: map[string]*model.Folder{
+			"f1": {ID: "f1", FolderName: "工作", Type: &noteType},
+		},
+		notes:  map[string]*model.Note{},
+		cards:  map[string]*model.Card{},
+		charts: map[string]*model.Chart{},
+		items: map[string]*model.Item{
+			"n1": {
+				ID:   "n1",
+				Name: "會議記錄",
+				Type: "NOTE",
+				Fields: map[string]interface{}{
+					"folderID": "f1",
+					"parentID": "f1",
+					"content":  "hello",
+				},
+			},
+		},
+	}
+
+	h := NewSyncEventHandler(fs, reader)
+	err := h.HandleEvent(context.Background(), SyncEvent{Collection: "item", UserID: "u1", DocID: "n1", Action: "update"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fs.Exists("u1/NOTE/工作/會議記錄.json") {
+		t.Fatal("expected item json to be exported")
+	}
+}
+
+func TestEventPipeline_ItemDelete_RemovesItemJSON(t *testing.T) {
+	fs := mirror.NewMemoryVaultFS()
+	if err := fs.MkdirAll("u1/NOTE"); err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.WriteFile("u1/NOTE/會議記錄.json", []byte(`{"id":"n1","itemType":"NOTE","name":"會議記錄"}`)); err != nil {
+		t.Fatal(err)
+	}
+
+	reader := &mockDataReader{
+		folders: map[string]*model.Folder{},
+		notes:   map[string]*model.Note{},
+		cards:   map[string]*model.Card{},
+		charts:  map[string]*model.Chart{},
+		items:   map[string]*model.Item{},
+	}
+
+	h := NewSyncEventHandler(fs, reader)
+	err := h.HandleEvent(context.Background(), SyncEvent{Collection: "item", UserID: "u1", DocID: "n1", Action: "delete"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fs.Exists("u1/NOTE/會議記錄.json") {
+		t.Fatal("expected item json to be removed")
 	}
 }

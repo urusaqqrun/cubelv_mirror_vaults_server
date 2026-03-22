@@ -2,42 +2,159 @@ package sync
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log"
 	"sync"
 	"time"
 )
 
-// USNQuerier 查詢 USN 變更的介面（由 database 層實作）
-type USNQuerier interface {
-	GetLatestUSN(ctx context.Context, userId string) (int, error)
-	GetChangesAfterUSN(ctx context.Context, userId string, afterUSN int) ([]SyncEvent, error)
+const (
+	defaultOwnerScanLimit  = 128
+	defaultChangeBatchSize = 100
+	defaultCursorLeaseTTL  = 2 * time.Minute
+)
+
+// ChangeRecord 是從 sync_changes 讀出的單一變更。
+type ChangeRecord struct {
+	Seq        int
+	UserID     string
+	ItemID     string
+	ChangeType string
+	CreatedAt  int64
 }
 
-// USNPoller 定時輪詢 USN 變更作為 Redis Streams 的兜底
-type USNPoller struct {
-	querier  USNQuerier
-	handler  EventHandler
-	interval time.Duration
-
-	mu      sync.RWMutex
-	lastUSN map[string]int // userId → lastSyncedUSN
-
-	activeUsersFn func() []string // 取得活躍用戶清單
+// CursorState 是 mirror_sync_cursor 的目前狀態。
+type CursorState struct {
+	OwnerUserID  string
+	LastSeq      int
+	LeaseOwner   string
+	LeaseUntilMs int64
+	LastError    string
+	UpdatedAtMs  int64
+	Initialized  bool
 }
 
-func NewUSNPoller(querier USNQuerier, handler EventHandler, interval time.Duration, activeUsersFn func() []string) *USNPoller {
-	return &USNPoller{
-		querier:       querier,
-		handler:       handler,
-		interval:      interval,
-		lastUSN:       make(map[string]int),
-		activeUsersFn: activeUsersFn,
+// BacklogStats 是同步 backlog 的摘要。
+type BacklogStats struct {
+	OwnersWithBacklog int
+	OldestPendingAtMs int64
+	StuckOwners       int
+}
+
+// ChangeLogStore 定義 worker 所需的持久化能力。
+type ChangeLogStore interface {
+	ListOwnersForSync(ctx context.Context, limit int) ([]string, error)
+	AcquireCursorLease(ctx context.Context, ownerUserID, leaseOwner string, leaseTTL time.Duration) (*CursorState, bool, error)
+	ReleaseCursorLease(ctx context.Context, ownerUserID, leaseOwner string) error
+	GetLatestSeq(ctx context.Context, userID string) (int, error)
+	GetChangesAfterSeq(ctx context.Context, userID string, afterSeq, limit int) ([]ChangeRecord, error)
+	MarkCursorInitialized(ctx context.Context, ownerUserID, leaseOwner string, seq int) error
+	AdvanceCursor(ctx context.Context, ownerUserID, leaseOwner string, seq int) error
+	RecordCursorError(ctx context.Context, ownerUserID, leaseOwner, message string) error
+	GetBacklogStats(ctx context.Context) (BacklogStats, error)
+}
+
+// ChangeProcessor 將 change log 記錄投影到 Vault。
+type ChangeProcessor interface {
+	ProcessChange(ctx context.Context, change ChangeRecord) error
+}
+
+// Bootstrapper 在首次建立 cursor 時做全量初始化。
+type Bootstrapper interface {
+	BootstrapOwner(ctx context.Context, ownerUserID string) error
+}
+
+// WorkerHealthSnapshot 提供健康檢查與觀測用的摘要。
+type WorkerHealthSnapshot struct {
+	Running              bool      `json:"running"`
+	LeaseOwner           string    `json:"leaseOwner"`
+	LastLoopAt           time.Time `json:"lastLoopAt,omitempty"`
+	LastSuccessfulSyncAt time.Time `json:"lastSuccessfulSyncAt,omitempty"`
+	LastProcessedOwner   string    `json:"lastProcessedOwner,omitempty"`
+	LastProcessedSeq     int       `json:"lastProcessedSeq,omitempty"`
+	LastError            string    `json:"lastError,omitempty"`
+	OwnersWithBacklog    int       `json:"ownersWithBacklog"`
+	OldestPendingAgeMs   int64     `json:"oldestPendingAgeMs"`
+	StuckOwners          int       `json:"stuckOwners"`
+}
+
+// ChangeWorker 以持久化 cursor 順序消化 sync_changes。
+type ChangeWorker struct {
+	store        ChangeLogStore
+	processor    ChangeProcessor
+	bootstrapper Bootstrapper
+	locker       VaultLocker
+
+	interval        time.Duration
+	leaseTTL        time.Duration
+	ownerScanLimit  int
+	changeBatchSize int
+	leaseOwner      string
+
+	mu       sync.RWMutex
+	snapshot WorkerHealthSnapshot
+}
+
+func NewChangeWorker(store ChangeLogStore, processor ChangeProcessor, bootstrapper Bootstrapper, locker VaultLocker, interval time.Duration, leaseOwner string) *ChangeWorker {
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+	if leaseOwner == "" {
+		leaseOwner = "mirror-worker"
+	}
+	return &ChangeWorker{
+		store:           store,
+		processor:       processor,
+		bootstrapper:    bootstrapper,
+		locker:          locker,
+		interval:        interval,
+		leaseTTL:        defaultCursorLeaseTTL,
+		ownerScanLimit:  defaultOwnerScanLimit,
+		changeBatchSize: defaultChangeBatchSize,
+		leaseOwner:      leaseOwner,
+		snapshot: WorkerHealthSnapshot{
+			LeaseOwner: leaseOwner,
+		},
 	}
 }
 
-// Start 開始輪詢迴圈
-func (p *USNPoller) Start(ctx context.Context) {
-	ticker := time.NewTicker(p.interval)
+func (w *ChangeWorker) SetLeaseTTL(leaseTTL time.Duration) {
+	if leaseTTL <= 0 {
+		return
+	}
+	w.leaseTTL = leaseTTL
+}
+
+func (w *ChangeWorker) SetOwnerScanLimit(limit int) {
+	if limit <= 0 {
+		return
+	}
+	w.ownerScanLimit = limit
+}
+
+func (w *ChangeWorker) SetChangeBatchSize(limit int) {
+	if limit <= 0 {
+		return
+	}
+	w.changeBatchSize = limit
+}
+
+// Snapshot 回傳目前 worker 狀態的快照。
+func (w *ChangeWorker) Snapshot() WorkerHealthSnapshot {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.snapshot
+}
+
+// Start 啟動主同步迴圈。
+func (w *ChangeWorker) Start(ctx context.Context) {
+	w.setRunning(true)
+	defer w.setRunning(false)
+
+	w.runOnce(ctx)
+
+	ticker := time.NewTicker(w.interval)
 	defer ticker.Stop()
 
 	for {
@@ -45,86 +162,176 @@ func (p *USNPoller) Start(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			p.pollAll(ctx)
+			w.runOnce(ctx)
 		}
 	}
 }
 
-// SetLastUSN 設定某用戶的最後同步 USN（用於初始化或外部更新）
-func (p *USNPoller) SetLastUSN(userId string, usn int) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.lastUSN[userId] = usn
-}
+func (w *ChangeWorker) runOnce(ctx context.Context) {
+	w.updateSnapshot(func(s *WorkerHealthSnapshot) {
+		s.LastLoopAt = time.Now()
+	})
 
-// GetLastUSN 取得某用戶的最後同步 USN
-func (p *USNPoller) GetLastUSN(userId string) int {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	return p.lastUSN[userId]
-}
-
-func (p *USNPoller) pollAll(ctx context.Context) {
-	if p.activeUsersFn == nil {
-		return
-	}
-	users := p.activeUsersFn()
-	if len(users) == 0 {
-		return
+	if err := w.refreshBacklogStats(ctx); err != nil {
+		w.setLastError(fmt.Sprintf("refresh backlog stats: %v", err))
+		log.Printf("[ChangeWorker] refresh backlog stats error: %v", err)
 	}
 
-	const maxWorkers = 4
-	sem := make(chan struct{}, maxWorkers)
-	var wg sync.WaitGroup
-
-	for _, userId := range users {
-		if ctx.Err() != nil {
-			break
-		}
-		wg.Add(1)
-		sem <- struct{}{}
-		go func(uid string) {
-			defer wg.Done()
-			defer func() { <-sem }()
-			pollCtx, pollCancel := context.WithTimeout(ctx, 15*time.Second)
-			defer pollCancel()
-			p.PollUser(pollCtx, uid)
-		}(userId)
-	}
-	wg.Wait()
-}
-
-// PollUser 查詢單一用戶的 USN 變更
-func (p *USNPoller) PollUser(ctx context.Context, userId string) int {
-	p.mu.RLock()
-	lastUSN := p.lastUSN[userId]
-	p.mu.RUnlock()
-
-	changes, err := p.querier.GetChangesAfterUSN(ctx, userId, lastUSN)
+	owners, err := w.store.ListOwnersForSync(ctx, w.ownerScanLimit)
 	if err != nil {
-		log.Printf("USN poll error (user=%s): %v", userId, err)
-		return 0
+		w.setLastError(fmt.Sprintf("list owners for sync: %v", err))
+		log.Printf("[ChangeWorker] list owners for sync error: %v", err)
+		return
 	}
 
-	maxUSN := lastUSN
-	processed := 0
-	for _, event := range changes {
-		if err := p.handler.HandleEvent(ctx, event); err != nil {
-			// 遇到失敗立即停止，不跳過：避免後續成功事件推進 maxUSN 導致本事件永久遺失
-			log.Printf("USN poll handle error (user=%s, USN=%d): %v", userId, event.USN, err)
-			break
+	for _, ownerUserID := range owners {
+		if ctx.Err() != nil {
+			return
 		}
-		processed++
-		if event.USN > maxUSN {
-			maxUSN = event.USN
+		if err := w.processOwner(ctx, ownerUserID); err != nil && !errors.Is(err, context.Canceled) {
+			log.Printf("[ChangeWorker] process owner %s error: %v", ownerUserID, err)
 		}
 	}
+}
 
-	if maxUSN > lastUSN {
-		p.mu.Lock()
-		p.lastUSN[userId] = maxUSN
-		p.mu.Unlock()
+func (w *ChangeWorker) processOwner(ctx context.Context, ownerUserID string) error {
+	cursor, acquired, err := w.store.AcquireCursorLease(ctx, ownerUserID, w.leaseOwner, w.leaseTTL)
+	if err != nil {
+		w.setLastError(fmt.Sprintf("acquire lease owner=%s: %v", ownerUserID, err))
+		return err
+	}
+	if !acquired || cursor == nil {
+		return nil
+	}
+	defer func() {
+		releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := w.store.ReleaseCursorLease(releaseCtx, ownerUserID, w.leaseOwner); err != nil {
+			log.Printf("[ChangeWorker] release lease owner=%s error: %v", ownerUserID, err)
+		}
+	}()
+
+	if w.locker != nil && w.locker.IsLocked(ownerUserID) {
+		return nil
 	}
 
-	return processed
+	if !cursor.Initialized {
+		return w.bootstrapOwner(ctx, ownerUserID)
+	}
+
+	changes, err := w.store.GetChangesAfterSeq(ctx, ownerUserID, cursor.LastSeq, w.changeBatchSize)
+	if err != nil {
+		w.setCursorError(ctx, ownerUserID, fmt.Sprintf("read changes after seq=%d: %v", cursor.LastSeq, err))
+		return err
+	}
+	if len(changes) == 0 {
+		return nil
+	}
+
+	for _, change := range changes {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if w.locker != nil && w.locker.IsLocked(ownerUserID) {
+			return nil
+		}
+
+		startedAt := time.Now()
+		if err := w.processor.ProcessChange(ctx, change); err != nil {
+			w.setCursorError(ctx, ownerUserID, fmt.Sprintf("process seq=%d item=%s: %v", change.Seq, change.ItemID, err))
+			return err
+		}
+		if err := w.store.AdvanceCursor(ctx, ownerUserID, w.leaseOwner, change.Seq); err != nil {
+			w.setCursorError(ctx, ownerUserID, fmt.Sprintf("advance cursor seq=%d: %v", change.Seq, err))
+			return err
+		}
+
+		durationMs := time.Since(startedAt).Milliseconds()
+		log.Printf("[ChangeWorker] owner=%s seq=%d change=%s item=%s duration_ms=%d",
+			ownerUserID, change.Seq, change.ChangeType, change.ItemID, durationMs)
+		w.updateSnapshot(func(s *WorkerHealthSnapshot) {
+			s.LastSuccessfulSyncAt = time.Now()
+			s.LastProcessedOwner = ownerUserID
+			s.LastProcessedSeq = change.Seq
+			s.LastError = ""
+		})
+	}
+
+	return nil
+}
+
+func (w *ChangeWorker) bootstrapOwner(ctx context.Context, ownerUserID string) error {
+	if w.bootstrapper == nil {
+		return fmt.Errorf("bootstrapper is nil")
+	}
+
+	bootstrapSeq, err := w.store.GetLatestSeq(ctx, ownerUserID)
+	if err != nil {
+		w.setCursorError(ctx, ownerUserID, fmt.Sprintf("read latest seq for bootstrap: %v", err))
+		return err
+	}
+	if err := w.bootstrapper.BootstrapOwner(ctx, ownerUserID); err != nil {
+		w.setCursorError(ctx, ownerUserID, fmt.Sprintf("bootstrap owner: %v", err))
+		return err
+	}
+	if err := w.store.MarkCursorInitialized(ctx, ownerUserID, w.leaseOwner, bootstrapSeq); err != nil {
+		w.setCursorError(ctx, ownerUserID, fmt.Sprintf("mark cursor initialized seq=%d: %v", bootstrapSeq, err))
+		return err
+	}
+
+	log.Printf("[ChangeWorker] bootstrap completed owner=%s seq=%d", ownerUserID, bootstrapSeq)
+	w.updateSnapshot(func(s *WorkerHealthSnapshot) {
+		s.LastSuccessfulSyncAt = time.Now()
+		s.LastProcessedOwner = ownerUserID
+		s.LastProcessedSeq = bootstrapSeq
+		s.LastError = ""
+	})
+	return nil
+}
+
+func (w *ChangeWorker) refreshBacklogStats(ctx context.Context) error {
+	stats, err := w.store.GetBacklogStats(ctx)
+	if err != nil {
+		return err
+	}
+
+	oldestAgeMs := int64(0)
+	if stats.OldestPendingAtMs > 0 {
+		oldestAgeMs = time.Now().UnixMilli() - stats.OldestPendingAtMs
+		if oldestAgeMs < 0 {
+			oldestAgeMs = 0
+		}
+	}
+
+	w.updateSnapshot(func(s *WorkerHealthSnapshot) {
+		s.OwnersWithBacklog = stats.OwnersWithBacklog
+		s.OldestPendingAgeMs = oldestAgeMs
+		s.StuckOwners = stats.StuckOwners
+	})
+	return nil
+}
+
+func (w *ChangeWorker) setCursorError(ctx context.Context, ownerUserID, message string) {
+	if err := w.store.RecordCursorError(ctx, ownerUserID, w.leaseOwner, message); err != nil {
+		log.Printf("[ChangeWorker] record cursor error owner=%s failed: %v", ownerUserID, err)
+	}
+	w.setLastError(message)
+}
+
+func (w *ChangeWorker) setLastError(message string) {
+	w.updateSnapshot(func(s *WorkerHealthSnapshot) {
+		s.LastError = message
+	})
+}
+
+func (w *ChangeWorker) setRunning(running bool) {
+	w.updateSnapshot(func(s *WorkerHealthSnapshot) {
+		s.Running = running
+	})
+}
+
+func (w *ChangeWorker) updateSnapshot(fn func(snapshot *WorkerHealthSnapshot)) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	fn(&w.snapshot)
 }

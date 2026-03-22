@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -42,9 +43,6 @@ func main() {
 	defer pgStore.Close()
 	pgStore.SetRedis(rdb)
 
-	// DataReader（由 PgStore 實作）
-	var dataReader vaultsync.DataReader = pgStore
-
 	// VaultFS（EFS 實作）
 	vaultFS := &mirror.RealVaultFS{Root: cfg.VaultRoot}
 
@@ -73,11 +71,25 @@ func main() {
 		usnInc:       pgStore,
 		usnSyncer:    pgStore,
 		latestUSN:    pgStore,
-		latestSeq:    pgStore,
 		fullExporter: pgStore,
 		ctx:          ctx,
 	}
 	taskStore := selectTaskStore(api.NewMemoryTaskStore(), rdb, cfg.TaskTimeoutMinutes)
+
+	projector := vaultsync.NewSyncEventHandler(vaultFS, pgStore)
+	projector.SetLocker(vaultLock)
+	projector.StartCacheEvictor(ctx)
+	worker := vaultsync.NewChangeWorker(
+		pgStore,
+		vaultsync.NewVaultChangeProcessor(projector),
+		vaultsync.NewFullExportBootstrapper(vaultFS, pgStore),
+		vaultLock,
+		time.Duration(cfg.SyncLoopIntervalSec)*time.Second,
+		"mirror-"+getHostname(),
+	)
+	worker.SetLeaseTTL(time.Duration(cfg.SyncCursorLeaseSec) * time.Second)
+	worker.SetOwnerScanLimit(cfg.SyncOwnerScanLimit)
+	worker.SetChangeBatchSize(cfg.SyncChangeBatchSize)
 
 	// API server
 	taskHandler := api.NewTaskHandler(taskExec, taskStore)
@@ -85,8 +97,13 @@ func main() {
 	mux := http.NewServeMux()
 	taskHandler.RegisterRoutes(mux)
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]interface{}{
+			"status": "ok",
+			"worker": worker.Snapshot(),
+		}
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"status":"ok"}`))
+		_ = json.NewEncoder(w).Encode(resp)
 	})
 
 	server := &http.Server{
@@ -96,40 +113,9 @@ func main() {
 
 	g, gCtx := errgroup.WithContext(ctx)
 
-	// Redis Streams consumer
-	eventHandler := vaultsync.NewSyncEventHandler(vaultFS, dataReader)
-	eventHandler.SetLocker(vaultLock)
-	eventHandler.StartCacheEvictor(ctx)
-	consumerName := "mirror-" + getHostname()
-	consumer := vaultsync.NewConsumer(rdb, eventHandler, consumerName)
-	log.Printf("Redis consumer name: %s", consumerName)
+	// PG-only change worker
 	g.Go(func() error {
-		if err := consumer.Start(gCtx); err != nil && gCtx.Err() == nil {
-			return fmt.Errorf("consumer: %w", err)
-		}
-		return nil
-	})
-
-	// USN poller 兜底（使用 PgStore 的 sync_changes 查詢）
-	activeUsersFn := func() []string {
-		c, cancelFn := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancelFn()
-		users, err := pgStore.ListActiveUsers(c)
-		if err != nil {
-			log.Printf("list active users failed: %v", err)
-			return []string{}
-		}
-		return users
-	}
-	poller := vaultsync.NewUSNPoller(
-		pgStore,
-		eventHandler,
-		time.Duration(cfg.USNPollIntervalSec)*time.Second,
-		activeUsersFn,
-	)
-	taskExec.poller = poller
-	g.Go(func() error {
-		poller.Start(gCtx)
+		worker.Start(gCtx)
 		return nil
 	})
 
@@ -186,11 +172,6 @@ type latestUSNReader interface {
 	GetLatestUSN(ctx context.Context, userID string) (int, error)
 }
 
-// seqReader 查詢 sync_changes 最大 seq（Poller 游標推進用）
-type seqReader interface {
-	GetLatestSeq(ctx context.Context, userID string) (int, error)
-}
-
 // fullTaskExecutor 整合所有執行元件
 type fullTaskExecutor struct {
 	claudeExec   *executor.ClaudeExecutor
@@ -202,9 +183,7 @@ type fullTaskExecutor struct {
 	usnInc       executor.USNIncrementer
 	usnSyncer    executor.USNSyncer
 	latestUSN    latestUSNReader
-	latestSeq    seqReader
 	fullExporter vaultsync.FullExporter
-	poller       *vaultsync.USNPoller
 	ctx          context.Context
 }
 
@@ -293,14 +272,6 @@ func (e *fullTaskExecutor) Execute(task *api.Task) error {
 		if e.usnSyncer != nil {
 			if syncErr := e.usnSyncer.SyncUserUSN(execCtx, task.UserID); syncErr != nil {
 				log.Printf("[Task %s] SyncUserUSN error: %v", task.ID, syncErr)
-			}
-		}
-
-		// 推進 USN Poller 的游標，避免回寫的資料被 poller 重複導出
-		// 使用 sync_changes.seq（Poller 實際追蹤的游標）而非 base_items.version
-		if e.poller != nil && e.latestSeq != nil {
-			if seq, err := e.latestSeq.GetLatestSeq(execCtx, task.UserID); err == nil {
-				e.poller.SetLastUSN(task.UserID, seq)
 			}
 		}
 	}
