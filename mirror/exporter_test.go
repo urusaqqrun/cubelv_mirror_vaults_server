@@ -289,6 +289,92 @@ func TestExportItem_FolderCreatesDir(t *testing.T) {
 	}
 }
 
+func TestExportItem_FolderCollision_UsesIDSuffix(t *testing.T) {
+	fs := NewMemoryVaultFS()
+	resolver := NewPathResolver([]FolderNode{
+		{ID: "f-a", FolderName: "inbox", Type: "NOTE", ParentID: nil},
+		{ID: "f-b", FolderName: "inbox", Type: "NOTE", ParentID: nil},
+	})
+	exp := NewExporter(fs, resolver)
+
+	first := &model.Item{ID: "f-a", Name: "inbox", Type: "NOTE_FOLDER", Fields: map[string]interface{}{}}
+	second := &model.Item{ID: "f-b", Name: "inbox", Type: "NOTE_FOLDER", Fields: map[string]interface{}{}}
+
+	firstResult, err := exp.ExportItem("user1", first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondResult, err := exp.ExportItem("user1", second)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if firstResult.Path != "user1/NOTE/inbox" {
+		t.Fatalf("unexpected first folder path: %q", firstResult.Path)
+	}
+	if !strings.Contains(secondResult.Path, "inbox_f-b") {
+		t.Fatalf("expected suffixed second folder path, got %q", secondResult.Path)
+	}
+	if !fs.Exists("user1/NOTE/inbox/inbox.json") {
+		t.Fatal("first folder metadata should exist")
+	}
+	if !fs.Exists("user1/NOTE/inbox_f-b/inbox.json") {
+		t.Fatal("second folder metadata should exist in suffixed directory")
+	}
+}
+
+func TestExportItem_LeafUsesIndexedFolderPathAfterFolderCollision(t *testing.T) {
+	fs := NewMemoryVaultFS()
+	resolver := NewPathResolver([]FolderNode{
+		{ID: "f-a", FolderName: "inbox", Type: "NOTE", ParentID: nil},
+		{ID: "f-b", FolderName: "inbox", Type: "NOTE", ParentID: nil},
+	})
+	exp := NewExporter(fs, resolver)
+
+	if _, err := exp.ExportItem("user1", &model.Item{ID: "f-a", Name: "inbox", Type: "NOTE_FOLDER", Fields: map[string]interface{}{}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := exp.ExportItem("user1", &model.Item{ID: "f-b", Name: "inbox", Type: "NOTE_FOLDER", Fields: map[string]interface{}{}}); err != nil {
+		t.Fatal(err)
+	}
+
+	childA := &model.Item{
+		ID:   "n-a",
+		Name: "第一份",
+		Type: "NOTE",
+		Fields: map[string]interface{}{
+			"folderID": "f-a",
+		},
+	}
+	childB := &model.Item{
+		ID:   "n-b",
+		Name: "第二份",
+		Type: "NOTE",
+		Fields: map[string]interface{}{
+			"folderID": "f-b",
+		},
+	}
+
+	resultA, err := exp.ExportItem("user1", childA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resultB, err := exp.ExportItem("user1", childB)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if resultA.Path != "user1/NOTE/inbox/第一份.json" {
+		t.Fatalf("unexpected childA path: %q", resultA.Path)
+	}
+	if resultB.Path != "user1/NOTE/inbox_f-b/第二份.json" {
+		t.Fatalf("unexpected childB path: %q", resultB.Path)
+	}
+	if !fs.Exists(resultA.Path) || !fs.Exists(resultB.Path) {
+		t.Fatal("both child files should exist in separate directories")
+	}
+}
+
 func TestExportItem_EmptyName_UsesFallback(t *testing.T) {
 	exp, fs := newItemTestExporter()
 	item := &model.Item{

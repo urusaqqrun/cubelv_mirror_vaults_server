@@ -146,7 +146,7 @@ func (e *Exporter) exportFolderItem(userId string, data ItemMirrorData) (string,
 		return "", fmt.Errorf("resolve folder path: %w", err)
 	}
 
-	fullDirPath := filepath.Join(userId, folderPath)
+	fullDirPath := e.resolveFolderDirCollision(filepath.Join(userId, folderPath), data.Name, data.ID)
 	e.cleanupOldFolderPath(userId, data.ID, fullDirPath)
 	if err := e.fs.MkdirAll(fullDirPath); err != nil {
 		return "", fmt.Errorf("mkdir: %w", err)
@@ -172,9 +172,10 @@ func (e *Exporter) exportLeafItem(userId string, data ItemMirrorData, item *mode
 	if err != nil {
 		return "", fmt.Errorf("resolve parent folder: %w", err)
 	}
+	parentDirPath := e.resolveIndexedFolderPath(userId, folderID, filepath.Join(userId, folderPath))
 
 	fileName := sanitizeName(data.Name) + ".json"
-	fullPath := filepath.Join(userId, folderPath, fileName)
+	fullPath := filepath.Join(parentDirPath, fileName)
 
 	// 檔名衝突處理：同路徑已存在且 ID 不同 → 加 ID 後綴
 	fullPath = e.resolveCollision(fullPath, data.ID)
@@ -229,6 +230,62 @@ func (e *Exporter) resolveCollision(targetPath, itemID string) string {
 	// 短後綴也被佔用 → 使用完整 ID
 	candidate = base + "_" + itemID + ext
 	return candidate
+}
+
+func (e *Exporter) resolveFolderDirCollision(targetDirPath, folderName, folderID string) string {
+	ownerID, owned := e.readFolderOwner(targetDirPath, folderName)
+	if !owned || ownerID == folderID {
+		return targetDirPath
+	}
+
+	suffix := collisionSuffix(folderID)
+	candidate := targetDirPath + "_" + suffix
+	ownerID, owned = e.readFolderOwner(candidate, folderName)
+	if !owned || ownerID == folderID {
+		return candidate
+	}
+
+	return targetDirPath + "_" + folderID
+}
+
+func (e *Exporter) resolveIndexedFolderPath(userID, folderID, fallbackPath string) string {
+	if folderID == "" {
+		return fallbackPath
+	}
+	e.ensureDocPathIndex(userID)
+	if indexed := e.getIndexedPath(userID, folderID); indexed != "" {
+		return indexed
+	}
+	return fallbackPath
+}
+
+func (e *Exporter) readFolderOwner(dirPath, folderName string) (string, bool) {
+	itemPath := filepath.Join(dirPath, sanitizeName(folderName)+".json")
+	if data, err := e.fs.ReadFile(itemPath); err == nil {
+		if parsed, err := MirrorJSONToItem(data); err == nil && model.IsFolder(parsed.ItemType) && parsed.ID != "" {
+			return parsed.ID, true
+		}
+	}
+
+	legacyPath := filepath.Join(dirPath, "_folder.json")
+	if data, err := e.fs.ReadFile(legacyPath); err == nil {
+		if meta, err := JSONToFolder(data); err == nil && meta.ID != "" {
+			return meta.ID, true
+		}
+	}
+
+	if !e.fs.Exists(dirPath) {
+		return "", false
+	}
+	return "", true
+}
+
+func collisionSuffix(itemID string) string {
+	suffix := itemID
+	if len(suffix) > 8 {
+		suffix = suffix[len(suffix)-8:]
+	}
+	return suffix
 }
 
 // cleanupOldItemPath 清理同 ID 但舊位置的檔案（改名/搬移情境）
