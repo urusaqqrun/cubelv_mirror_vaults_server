@@ -25,115 +25,123 @@ func (m *mockDataReader) ListFolders(_ context.Context, _ string) ([]*model.Fold
 	}
 	return out, nil
 }
+
 func (m *mockDataReader) GetFolder(_ context.Context, _ string, id string) (*model.Folder, error) {
 	return m.folders[id], nil
 }
+
 func (m *mockDataReader) GetNote(_ context.Context, _ string, id string) (*model.Note, error) {
 	return m.notes[id], nil
 }
+
 func (m *mockDataReader) GetCard(_ context.Context, _ string, id string) (*model.Card, error) {
 	return m.cards[id], nil
 }
+
 func (m *mockDataReader) GetChart(_ context.Context, _ string, id string) (*model.Chart, error) {
 	return m.charts[id], nil
 }
+
 func (m *mockDataReader) GetItem(_ context.Context, _ string, id string) (*model.Item, error) {
 	return m.items[id], nil
 }
-func (m *mockDataReader) ListItemFolders(_ context.Context, _ string) ([]*model.Item, error) {
-	items := make([]*model.Item, 0, len(m.folders))
-	for _, f := range m.folders {
-		ft := f.GetType()
-		parentID := ""
-		if f.ParentID != nil {
-			parentID = *f.ParentID
-		}
-		items = append(items, &model.Item{
-			ID:   f.ID,
-			Type: "FOLDER",
-			Fields: map[string]interface{}{
-				"name":       f.FolderName,
-				"folderType": ft,
-				"parentID":   parentID,
-			},
-		})
+
+func (m *mockDataReader) ListAllItems(_ context.Context, _ string) ([]*model.Item, error) {
+	out := make([]*model.Item, 0, len(m.items))
+	for _, item := range m.items {
+		out = append(out, item)
 	}
-	return items, nil
+	return out, nil
 }
 
 func ptr(s string) *string { return &s }
 
-func TestEventPipeline_NoteCreate_ExportsMarkdown(t *testing.T) {
+func TestEventPipeline_ItemCreate_ExportsNestedJSON(t *testing.T) {
 	fs := mirror.NewMemoryVaultFS()
-	noteType := "NOTE"
-	title := "新筆記"
-	content := "<p>Hello</p>"
-
 	reader := &mockDataReader{
-		folders: map[string]*model.Folder{
-			"f1": {ID: "f1", FolderName: "工作", Type: &noteType},
+		items: map[string]*model.Item{
+			"f1": {ID: "f1", Name: "工作", Type: "NOTE_FOLDER", Fields: map[string]interface{}{}},
+			"n1": {ID: "n1", Name: "筆記A", Type: "NOTE", Fields: map[string]interface{}{"parentID": "f1", "content": "hello"}},
+			"n2": {ID: "n2", Name: "A評論", Type: "NOTE", Fields: map[string]interface{}{"parentID": "n1", "content": "reply"}},
 		},
-		notes: map[string]*model.Note{
-			"n1": {ID: "n1", Title: &title, Content: &content, FolderID: "f1", Usn: 3, CreateAt: 1, UpdateAt: 2},
-		},
-		cards:  map[string]*model.Card{},
-		charts: map[string]*model.Chart{},
-		items:  map[string]*model.Item{},
 	}
 
 	h := NewSyncEventHandler(fs, reader)
-	err := h.HandleEvent(context.Background(), SyncEvent{Collection: "note", UserID: "u1", DocID: "n1", Action: "create"})
-	if err != nil {
-		t.Fatal(err)
+	for _, docID := range []string{"f1", "n1", "n2"} {
+		if err := h.HandleEvent(context.Background(), SyncEvent{Collection: "item", UserID: "u1", DocID: docID, Action: "create"}); err != nil {
+			t.Fatal(err)
+		}
 	}
 
-	if !fs.Exists("u1/NOTE/工作/新筆記.md") {
-		t.Fatal("expected markdown to be exported")
+	if !fs.Exists("u1/NOTE/工作.json") {
+		t.Fatal("expected folder json to be exported")
 	}
-	data, _ := fs.ReadFile("u1/NOTE/工作/新筆記.md")
-	if string(data) == "" {
-		t.Fatal("markdown should not be empty")
+	if !fs.Exists("u1/NOTE/工作/筆記A.json") {
+		t.Fatal("expected parent note json to be exported")
+	}
+	if !fs.Exists("u1/NOTE/工作/筆記A/A評論.json") {
+		t.Fatal("expected child note json to be exported")
 	}
 }
 
-func TestEventPipeline_FolderUpdate_ExportsFolderJSON(t *testing.T) {
+func TestEventPipeline_FolderUpdate_ExportsSiblingJSON(t *testing.T) {
 	fs := mirror.NewMemoryVaultFS()
 	noteType := "NOTE"
 	reader := &mockDataReader{
 		folders: map[string]*model.Folder{
 			"f1": {ID: "f1", FolderName: "工作", Type: &noteType, Usn: 2},
 		},
-		notes: map[string]*model.Note{},
-		cards: map[string]*model.Card{}, charts: map[string]*model.Chart{}, items: map[string]*model.Item{},
+		items: map[string]*model.Item{
+			"f1": {ID: "f1", Name: "工作", Type: "NOTE_FOLDER", Fields: map[string]interface{}{}},
+		},
 	}
 
 	h := NewSyncEventHandler(fs, reader)
-	err := h.HandleEvent(context.Background(), SyncEvent{Collection: "folder", UserID: "u1", DocID: "f1", Action: "update"})
-	if err != nil {
+	if err := h.HandleEvent(context.Background(), SyncEvent{Collection: "folder", UserID: "u1", DocID: "f1", Action: "update"}); err != nil {
 		t.Fatal(err)
 	}
-	if !fs.Exists("u1/NOTE/工作/_folder.json") {
-		t.Fatal("expected _folder.json to be exported")
+	if !fs.Exists("u1/NOTE/工作.json") {
+		t.Fatal("expected folder json to be exported")
 	}
 }
 
-func TestEventPipeline_NoteDelete_RemovesFileByDocID(t *testing.T) {
+func TestEventPipeline_NoteCreate_ExportsJSON(t *testing.T) {
 	fs := mirror.NewMemoryVaultFS()
-	md := "---\nid: n1\nparentID: f1\ntitle: test\nusn: 1\nhtmlHash: h\ncreatedAt: \"1\"\nupdatedAt: \"1\"\n---\ncontent"
-	_ = fs.WriteFile("u1/NOTE/工作/test.md", []byte(md))
+	title := "新筆記"
+	content := "<p>Hello</p>"
+	reader := &mockDataReader{
+		notes: map[string]*model.Note{
+			"n1": {ID: "n1", Title: &title, Content: &content, ParentID: "f1", Usn: 3, CreateAt: 1, UpdateAt: 2},
+		},
+		items: map[string]*model.Item{
+			"f1": {ID: "f1", Name: "工作", Type: "NOTE_FOLDER", Fields: map[string]interface{}{}},
+		},
+	}
 
-	reader := &mockDataReader{folders: map[string]*model.Folder{}, notes: map[string]*model.Note{}, cards: map[string]*model.Card{}, charts: map[string]*model.Chart{}, items: map[string]*model.Item{}}
 	h := NewSyncEventHandler(fs, reader)
-	err := h.HandleEvent(context.Background(), SyncEvent{Collection: "note", UserID: "u1", DocID: "n1", Action: "delete"})
-	if err != nil {
+	if err := h.HandleEvent(context.Background(), SyncEvent{Collection: "note", UserID: "u1", DocID: "n1", Action: "create"}); err != nil {
 		t.Fatal(err)
 	}
-	if fs.Exists("u1/NOTE/工作/test.md") {
-		t.Fatal("expected deleted note file to be removed")
+	if !fs.Exists("u1/NOTE/工作/新筆記.json") {
+		t.Fatal("expected note json to be exported")
 	}
 }
 
-// testVaultLocker 測試用 VaultLocker 實作
+func TestEventPipeline_ItemDelete_RemovesJSONAndContainer(t *testing.T) {
+	fs := mirror.NewMemoryVaultFS()
+	_ = fs.WriteFile("u1/NOTE/工作/test.json", []byte(`{"id":"n1","name":"test","itemType":"NOTE","fields":{"parentID":"f1"}}`))
+	_ = fs.WriteFile("u1/NOTE/工作/test/reply.json", []byte(`{"id":"n2","name":"reply","itemType":"NOTE","fields":{"parentID":"n1"}}`))
+
+	reader := &mockDataReader{items: map[string]*model.Item{}}
+	h := NewSyncEventHandler(fs, reader)
+	if err := h.HandleEvent(context.Background(), SyncEvent{Collection: "item", UserID: "u1", DocID: "n1", Action: "delete"}); err != nil {
+		t.Fatal(err)
+	}
+	if fs.Exists("u1/NOTE/工作/test.json") || fs.Exists("u1/NOTE/工作/test") {
+		t.Fatal("expected deleted item projection to be removed")
+	}
+}
+
 type testVaultLocker struct {
 	locked map[string]bool
 }
@@ -144,29 +152,21 @@ func (l *testVaultLocker) IsLocked(userId string) bool {
 
 func TestHandleEvent_VaultLocked_ReturnsError(t *testing.T) {
 	fs := mirror.NewMemoryVaultFS()
-	reader := &mockDataReader{
-		folders: map[string]*model.Folder{},
-		notes:   map[string]*model.Note{},
-		cards:   map[string]*model.Card{},
-		charts:  map[string]*model.Chart{},
-		items:   map[string]*model.Item{},
-	}
+	reader := &mockDataReader{items: map[string]*model.Item{}}
 	h := NewSyncEventHandler(fs, reader)
 
 	locker := &testVaultLocker{locked: map[string]bool{"u1": true}}
 	h.SetLocker(locker)
 
-	// 被鎖定的用戶應該收到 ErrVaultLocked
 	err := h.HandleEvent(context.Background(), SyncEvent{
-		Collection: "note", UserID: "u1", DocID: "n1", Action: "create",
+		Collection: "item", UserID: "u1", DocID: "n1", Action: "create",
 	})
 	if !errors.Is(err, ErrVaultLocked) {
 		t.Fatalf("expected ErrVaultLocked, got %v", err)
 	}
 
-	// 未鎖定的用戶應正常通過（即使 reader 找不到資料也不會報 ErrVaultLocked）
 	err = h.HandleEvent(context.Background(), SyncEvent{
-		Collection: "note", UserID: "u2", DocID: "n2", Action: "create",
+		Collection: "item", UserID: "u2", DocID: "n2", Action: "create",
 	})
 	if errors.Is(err, ErrVaultLocked) {
 		t.Fatal("u2 不該被鎖定")
@@ -175,222 +175,102 @@ func TestHandleEvent_VaultLocked_ReturnsError(t *testing.T) {
 
 func TestHandleEvent_VaultUnlocked_ProcessesNormally(t *testing.T) {
 	fs := mirror.NewMemoryVaultFS()
-	noteType := "NOTE"
-	title := "test"
-	content := "<p>ok</p>"
 	reader := &mockDataReader{
-		folders: map[string]*model.Folder{
-			"f1": {ID: "f1", FolderName: "Work", Type: &noteType},
+		items: map[string]*model.Item{
+			"f1": {ID: "f1", Name: "Work", Type: "NOTE_FOLDER", Fields: map[string]interface{}{}},
+			"n1": {ID: "n1", Name: "test", Type: "NOTE", Fields: map[string]interface{}{"parentID": "f1", "content": "<p>ok</p>"}},
 		},
-		notes: map[string]*model.Note{
-			"n1": {ID: "n1", Title: &title, Content: &content, FolderID: "f1", Usn: 1, CreateAt: 1, UpdateAt: 2},
-		},
-		cards: map[string]*model.Card{}, charts: map[string]*model.Chart{}, items: map[string]*model.Item{},
 	}
 	h := NewSyncEventHandler(fs, reader)
 
-	// 先鎖定再解鎖
 	locker := &testVaultLocker{locked: map[string]bool{"u1": true}}
 	h.SetLocker(locker)
 
 	err := h.HandleEvent(context.Background(), SyncEvent{
-		Collection: "note", UserID: "u1", DocID: "n1", Action: "create",
+		Collection: "item", UserID: "u1", DocID: "n1", Action: "create",
 	})
 	if !errors.Is(err, ErrVaultLocked) {
 		t.Fatal("should be locked")
 	}
 
-	// 解鎖後應正常處理
 	locker.locked["u1"] = false
 	err = h.HandleEvent(context.Background(), SyncEvent{
-		Collection: "note", UserID: "u1", DocID: "n1", Action: "create",
+		Collection: "item", UserID: "u1", DocID: "n1", Action: "create",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !fs.Exists("u1/NOTE/Work/test.md") {
-		t.Fatal("note should be exported after unlock")
+	if !fs.Exists("u1/NOTE/Work/test.json") {
+		t.Fatal("item should be exported after unlock")
 	}
 }
 
-// countingDataReader 記錄 ListItemFolders 呼叫次數
 type countingDataReader struct {
 	mockDataReader
-	listFoldersCalls int32
+	listAllItemsCalls int32
 }
 
-func (m *countingDataReader) ListItemFolders(ctx context.Context, userID string) ([]*model.Item, error) {
-	atomic.AddInt32(&m.listFoldersCalls, 1)
-	return m.mockDataReader.ListItemFolders(ctx, userID)
+func (m *countingDataReader) ListAllItems(ctx context.Context, userID string) ([]*model.Item, error) {
+	atomic.AddInt32(&m.listAllItemsCalls, 1)
+	return m.mockDataReader.ListAllItems(ctx, userID)
 }
 
-func TestResolverCache_ReducesListFoldersCalls(t *testing.T) {
+func TestResolverCache_ReducesListAllItemsCalls(t *testing.T) {
 	fs := mirror.NewMemoryVaultFS()
-	noteType := "NOTE"
-	title1 := "note1"
-	title2 := "note2"
-	content := "<p>x</p>"
-
 	reader := &countingDataReader{
 		mockDataReader: mockDataReader{
-			folders: map[string]*model.Folder{
-				"f1": {ID: "f1", FolderName: "Work", Type: &noteType},
+			items: map[string]*model.Item{
+				"f1": {ID: "f1", Name: "Work", Type: "NOTE_FOLDER", Fields: map[string]interface{}{}},
+				"n1": {ID: "n1", Name: "note1", Type: "NOTE", Fields: map[string]interface{}{"parentID": "f1", "content": "<p>x</p>"}},
+				"n2": {ID: "n2", Name: "note2", Type: "NOTE", Fields: map[string]interface{}{"parentID": "f1", "content": "<p>x</p>"}},
 			},
-			notes: map[string]*model.Note{
-				"n1": {ID: "n1", Title: &title1, Content: &content, FolderID: "f1", Usn: 1, CreateAt: 1, UpdateAt: 2},
-				"n2": {ID: "n2", Title: &title2, Content: &content, FolderID: "f1", Usn: 2, CreateAt: 1, UpdateAt: 2},
-			},
-			cards: map[string]*model.Card{}, charts: map[string]*model.Chart{}, items: map[string]*model.Item{},
 		},
 	}
 
 	h := NewSyncEventHandler(fs, reader)
-
-	// 同一用戶連續 5 個 note 事件，應只查 1 次 ListItemFolders（快取命中）
 	for i := 0; i < 5; i++ {
 		docID := "n1"
 		if i%2 == 1 {
 			docID = "n2"
 		}
 		h.HandleEvent(context.Background(), SyncEvent{
-			Collection: "note", UserID: "u1", DocID: docID, Action: "update",
+			Collection: "item", UserID: "u1", DocID: docID, Action: "update",
 		})
 	}
 
-	calls := atomic.LoadInt32(&reader.listFoldersCalls)
-	if calls > 1 {
-		t.Errorf("expected ListItemFolders called <= 1 time (cached), got %d", calls)
+	calls := atomic.LoadInt32(&reader.listAllItemsCalls)
+	if calls != 5 {
+		t.Errorf("expected ListAllItems called once per item event after full invalidation, got %d", calls)
 	}
-	t.Logf("ListItemFolders calls for 5 events: %d", calls)
 }
 
 func TestResolverCache_InvalidatedOnFolderEvent(t *testing.T) {
 	fs := mirror.NewMemoryVaultFS()
-	noteType := "NOTE"
-	title := "n"
-	content := "<p>x</p>"
-
 	reader := &countingDataReader{
 		mockDataReader: mockDataReader{
 			folders: map[string]*model.Folder{
-				"f1": {ID: "f1", FolderName: "Work", Type: &noteType},
+				"f1": {ID: "f1", FolderName: "Work", Type: ptr("NOTE")},
 			},
-			notes: map[string]*model.Note{
-				"n1": {ID: "n1", Title: &title, Content: &content, FolderID: "f1", Usn: 1, CreateAt: 1, UpdateAt: 2},
+			items: map[string]*model.Item{
+				"f1": {ID: "f1", Name: "Work", Type: "NOTE_FOLDER", Fields: map[string]interface{}{}},
+				"n1": {ID: "n1", Name: "n", Type: "NOTE", Fields: map[string]interface{}{"parentID": "f1", "content": "<p>x</p>"}},
 			},
-			cards: map[string]*model.Card{}, charts: map[string]*model.Chart{}, items: map[string]*model.Item{},
 		},
 	}
 
 	h := NewSyncEventHandler(fs, reader)
-
-	// 第一次 note 事件：cache miss → 查 1 次 ListItemFolders
 	h.HandleEvent(context.Background(), SyncEvent{
-		Collection: "note", UserID: "u1", DocID: "n1", Action: "update",
+		Collection: "item", UserID: "u1", DocID: "n1", Action: "update",
 	})
-
-	// folder 事件 → invalidate cache
 	h.HandleEvent(context.Background(), SyncEvent{
 		Collection: "folder", UserID: "u1", DocID: "f1", Action: "update",
 	})
-
-	// 第二次 note 事件：cache 已 invalidated → 再查 1 次 ListItemFolders
 	h.HandleEvent(context.Background(), SyncEvent{
-		Collection: "note", UserID: "u1", DocID: "n1", Action: "update",
+		Collection: "item", UserID: "u1", DocID: "n1", Action: "update",
 	})
 
-	calls := atomic.LoadInt32(&reader.listFoldersCalls)
-	// 第 1 次 note = 1（cache miss），folder update invalidates + rebuilds = 1，
-	// 第 2 次 note 命中 folder 事件重建的快取 → 共 2 次
-	if calls != 2 {
-		t.Errorf("expected ListItemFolders == 2 (cache invalidated then rebuilt by folder event), got %d", calls)
-	}
-	t.Logf("ListItemFolders calls after folder invalidation: %d", calls)
-}
-
-func TestEventPipeline_CardCreate_ExportsCardJSON(t *testing.T) {
-	fs := mirror.NewMemoryVaultFS()
-	cardType := "CARD"
-	fields := `{"name":"A"}`
-	reader := &mockDataReader{
-		folders: map[string]*model.Folder{
-			"c1": {ID: "c1", FolderName: "卡片夾", Type: &cardType},
-		},
-		notes: map[string]*model.Note{},
-		cards: map[string]*model.Card{
-			"card1": {ID: "card1", ParentID: "c1", Name: "卡片一", Fields: &fields, Usn: 1},
-		},
-		charts: map[string]*model.Chart{},
-		items:  map[string]*model.Item{},
-	}
-
-	h := NewSyncEventHandler(fs, reader)
-	err := h.HandleEvent(context.Background(), SyncEvent{Collection: "card", UserID: "u1", DocID: "card1", Action: "create"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !fs.Exists("u1/CARD/卡片夾/卡片一.json") {
-		t.Fatal("expected card json to be exported")
-	}
-}
-
-func TestEventPipeline_ItemUpdate_ExportsItemJSON(t *testing.T) {
-	fs := mirror.NewMemoryVaultFS()
-	noteType := "NOTE"
-	reader := &mockDataReader{
-		folders: map[string]*model.Folder{
-			"f1": {ID: "f1", FolderName: "工作", Type: &noteType},
-		},
-		notes:  map[string]*model.Note{},
-		cards:  map[string]*model.Card{},
-		charts: map[string]*model.Chart{},
-		items: map[string]*model.Item{
-			"n1": {
-				ID:   "n1",
-				Name: "會議記錄",
-				Type: "NOTE",
-				Fields: map[string]interface{}{
-					"folderID": "f1",
-					"parentID": "f1",
-					"content":  "hello",
-				},
-			},
-		},
-	}
-
-	h := NewSyncEventHandler(fs, reader)
-	err := h.HandleEvent(context.Background(), SyncEvent{Collection: "item", UserID: "u1", DocID: "n1", Action: "update"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !fs.Exists("u1/NOTE/工作/會議記錄.json") {
-		t.Fatal("expected item json to be exported")
-	}
-}
-
-func TestEventPipeline_ItemDelete_RemovesItemJSON(t *testing.T) {
-	fs := mirror.NewMemoryVaultFS()
-	if err := fs.MkdirAll("u1/NOTE"); err != nil {
-		t.Fatal(err)
-	}
-	if err := fs.WriteFile("u1/NOTE/會議記錄.json", []byte(`{"id":"n1","itemType":"NOTE","name":"會議記錄"}`)); err != nil {
-		t.Fatal(err)
-	}
-
-	reader := &mockDataReader{
-		folders: map[string]*model.Folder{},
-		notes:   map[string]*model.Note{},
-		cards:   map[string]*model.Card{},
-		charts:  map[string]*model.Chart{},
-		items:   map[string]*model.Item{},
-	}
-
-	h := NewSyncEventHandler(fs, reader)
-	err := h.HandleEvent(context.Background(), SyncEvent{Collection: "item", UserID: "u1", DocID: "n1", Action: "delete"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fs.Exists("u1/NOTE/會議記錄.json") {
-		t.Fatal("expected item json to be removed")
+	calls := atomic.LoadInt32(&reader.listAllItemsCalls)
+	if calls != 3 {
+		t.Errorf("expected ListAllItems == 3 with item invalidation plus folder invalidation, got %d", calls)
 	}
 }

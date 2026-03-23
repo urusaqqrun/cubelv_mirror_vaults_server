@@ -29,96 +29,28 @@ func NewExporter(fs VaultFS, resolver *PathResolver) *Exporter {
 	return &Exporter{fs: fs, resolver: resolver}
 }
 
-// ExportFolder 匯出 Folder 為目錄 + _folder.json
+// ExportFolder 舊介面轉為統一 Item JSON 匯出。
 func (e *Exporter) ExportFolder(userId string, meta FolderMeta) error {
-	folderPath, err := e.resolver.ResolveFolderPath(meta.ID)
-	if err != nil {
-		return fmt.Errorf("resolve folder path: %w", err)
-	}
-
-	fullPath := filepath.Join(userId, folderPath)
-	e.cleanupOldFolderPath(userId, meta.ID, fullPath)
-	if err := e.fs.MkdirAll(fullPath); err != nil {
-		return fmt.Errorf("mkdir: %w", err)
-	}
-
-	data, err := FolderToJSON(meta)
-	if err != nil {
-		return fmt.Errorf("folder to json: %w", err)
-	}
-
-	jsonPath := filepath.Join(fullPath, "_folder.json")
-	if err := e.fs.WriteFile(jsonPath, data); err != nil {
-		return err
-	}
-	e.setIndexedPath(userId, meta.ID, fullPath)
-	return nil
+	_, err := e.ExportItem(userId, folderMetaToItem(meta))
+	return err
 }
 
-// ExportNote 匯出 Note 為 .md 檔案（含 frontmatter）
+// ExportNote 舊介面轉為統一 Item JSON 匯出。
 func (e *Exporter) ExportNote(userId string, meta NoteMeta, html string) error {
-	notePath, err := e.resolver.ResolveNotePath(meta.Title, meta.ParentID)
-	if err != nil {
-		return fmt.Errorf("resolve note path: %w", err)
-	}
-
-	md, err := NoteToMarkdown(meta, html)
-	if err != nil {
-		return fmt.Errorf("note to markdown: %w", err)
-	}
-
-	fullPath := filepath.Join(userId, notePath)
-
-	// 先刪掉同 ID 但不同標題的舊檔案（標題改了 → 路徑改了）
-	e.cleanupOldNoteFile(userId, meta.ID, fullPath)
-
-	if err := e.fs.WriteFile(fullPath, []byte(md)); err != nil {
-		return err
-	}
-	e.setIndexedPath(userId, meta.ID, fullPath)
-	return nil
+	_, err := e.ExportItem(userId, noteMetaToItem(meta, html))
+	return err
 }
 
-// ExportCard 匯出 Card 為 .json 檔案
+// ExportCard 舊介面轉為統一 Item JSON 匯出。
 func (e *Exporter) ExportCard(userId string, meta CardMeta) error {
-	cardPath, err := e.resolver.ResolveCardPath(meta.Name, meta.ParentID)
-	if err != nil {
-		return fmt.Errorf("resolve card path: %w", err)
-	}
-
-	data, err := CardToJSON(meta)
-	if err != nil {
-		return fmt.Errorf("card to json: %w", err)
-	}
-
-	fullPath := filepath.Join(userId, cardPath)
-	e.cleanupOldCardPath(userId, meta.ID, fullPath)
-	if err := e.fs.WriteFile(fullPath, data); err != nil {
-		return err
-	}
-	e.setIndexedPath(userId, meta.ID, fullPath)
-	return nil
+	_, err := e.ExportItem(userId, cardMetaToItem(meta, "CARD"))
+	return err
 }
 
-// ExportChart 匯出 Chart 為 .json 檔案
+// ExportChart 舊介面轉為統一 Item JSON 匯出。
 func (e *Exporter) ExportChart(userId string, meta CardMeta) error {
-	chartPath, err := e.resolver.ResolveChartPath(meta.Name, meta.ParentID)
-	if err != nil {
-		return fmt.Errorf("resolve chart path: %w", err)
-	}
-
-	data, err := CardToJSON(meta)
-	if err != nil {
-		return fmt.Errorf("chart to json: %w", err)
-	}
-
-	fullPath := filepath.Join(userId, chartPath)
-	e.cleanupOldCardPath(userId, meta.ID, fullPath)
-	if err := e.fs.WriteFile(fullPath, data); err != nil {
-		return err
-	}
-	e.setIndexedPath(userId, meta.ID, fullPath)
-	return nil
+	_, err := e.ExportItem(userId, cardMetaToItem(meta, "CHART"))
+	return err
 }
 
 // ExportItemResult ExportItem 的回傳結果
@@ -127,71 +59,59 @@ type ExportItemResult struct {
 	IsFolder bool
 }
 
-// ExportItem 通用匯出：將任意 Item 寫為 name.json（資料夾會先建目錄）
+// ExportItem 通用匯出：每個 item 都對應一個 name.json。
 func (e *Exporter) ExportItem(userId string, item *model.Item) (ExportItemResult, error) {
 	mirrorData := ItemToMirrorData(item)
-
-	if model.IsFolder(item.Type) {
-		path, err := e.exportFolderItem(userId, mirrorData)
-		return ExportItemResult{Path: path, IsFolder: true}, err
-	}
-	path, err := e.exportLeafItem(userId, mirrorData, item)
-	return ExportItemResult{Path: path, IsFolder: false}, err
-}
-
-// exportFolderItem 匯出資料夾類型：建目錄 + 寫 name.json，回傳目錄路徑
-func (e *Exporter) exportFolderItem(userId string, data ItemMirrorData) (string, error) {
-	folderPath, err := e.resolver.ResolveFolderPath(data.ID)
-	if err != nil {
-		return "", fmt.Errorf("resolve folder path: %w", err)
+	parentDirPath := e.resolveParentDir(userId, item.GetParentID(), item.Type)
+	if err := e.fs.MkdirAll(parentDirPath); err != nil {
+		return ExportItemResult{}, fmt.Errorf("mkdir parent: %w", err)
 	}
 
-	fullDirPath := e.resolveFolderDirCollision(filepath.Join(userId, folderPath), data.Name, data.ID)
-	e.cleanupOldFolderPath(userId, data.ID, fullDirPath)
-	if err := e.fs.MkdirAll(fullDirPath); err != nil {
-		return "", fmt.Errorf("mkdir: %w", err)
-	}
-
-	jsonBytes, err := ItemToMirrorJSON(data)
-	if err != nil {
-		return "", fmt.Errorf("marshal item json: %w", err)
-	}
-
-	jsonPath := filepath.Join(fullDirPath, sanitizeName(data.Name)+".json")
-	if err := e.fs.WriteFile(jsonPath, jsonBytes); err != nil {
-		return "", err
-	}
-	e.setIndexedPath(userId, data.ID, fullDirPath)
-	return fullDirPath, nil
-}
-
-// exportLeafItem 匯出非資料夾類型：寫 name.json 到所屬資料夾，回傳檔案路徑
-func (e *Exporter) exportLeafItem(userId string, data ItemMirrorData, item *model.Item) (string, error) {
-	folderID := item.GetFolderID()
-	folderPath, err := e.resolver.ResolveFolderPath(folderID)
-	if err != nil {
-		return "", fmt.Errorf("resolve parent folder: %w", err)
-	}
-	parentDirPath := e.resolveIndexedFolderPath(userId, folderID, filepath.Join(userId, folderPath))
-
-	fileName := sanitizeName(data.Name) + ".json"
+	fileName := sanitizeName(mirrorData.Name) + ".json"
 	fullPath := filepath.Join(parentDirPath, fileName)
 
-	// 檔名衝突處理：同路徑已存在且 ID 不同 → 加 ID 後綴
-	fullPath = e.resolveCollision(fullPath, data.ID)
+	// 檔名衝突處理：同路徑已存在且 ID 不同 → 加 ID 後綴。
+	fullPath = e.resolveCollision(fullPath, mirrorData.ID)
 
-	e.cleanupOldItemPath(userId, data.ID, fullPath)
+	e.cleanupOldItemPath(userId, mirrorData.ID, fullPath)
 
-	jsonBytes, err := ItemToMirrorJSON(data)
+	jsonBytes, err := ItemToMirrorJSON(mirrorData)
 	if err != nil {
-		return "", fmt.Errorf("marshal item json: %w", err)
+		return ExportItemResult{}, fmt.Errorf("marshal item json: %w", err)
 	}
 
 	if err := e.fs.WriteFile(fullPath, jsonBytes); err != nil {
-		return "", err
+		return ExportItemResult{}, err
 	}
-	e.setIndexedPath(userId, data.ID, fullPath)
-	return fullPath, nil
+
+	e.setIndexedPath(userId, mirrorData.ID, fullPath)
+	return ExportItemResult{
+		Path:     fullPath,
+		IsFolder: model.IsFolder(item.Type),
+	}, nil
+}
+
+func (e *Exporter) resolveParentDir(userID, parentID, itemType string) string {
+	if parentID == "" {
+		return filepath.Join(userID, resolveTypeFromItemType(itemType))
+	}
+
+	resolvedPath, err := e.resolver.ResolvePath(parentID)
+	if err != nil || resolvedPath == "" {
+		return filepath.Join(userID, "_unsorted")
+	}
+	return e.resolveIndexedParentDir(userID, parentID, filepath.Join(userID, resolvedPath))
+}
+
+func (e *Exporter) resolveIndexedParentDir(userID, parentID, fallbackPath string) string {
+	if parentID == "" {
+		return fallbackPath
+	}
+	e.ensureDocPathIndex(userID)
+	if indexed := e.getIndexedPath(userID, parentID); indexed != "" {
+		return strings.TrimSuffix(indexed, ".json")
+	}
+	return fallbackPath
 }
 
 // resolveCollision 若目標路徑已被不同 ID 佔用，加 _{id後8碼} 後綴。
@@ -232,54 +152,6 @@ func (e *Exporter) resolveCollision(targetPath, itemID string) string {
 	return candidate
 }
 
-func (e *Exporter) resolveFolderDirCollision(targetDirPath, folderName, folderID string) string {
-	ownerID, owned := e.readFolderOwner(targetDirPath, folderName)
-	if !owned || ownerID == folderID {
-		return targetDirPath
-	}
-
-	suffix := collisionSuffix(folderID)
-	candidate := targetDirPath + "_" + suffix
-	ownerID, owned = e.readFolderOwner(candidate, folderName)
-	if !owned || ownerID == folderID {
-		return candidate
-	}
-
-	return targetDirPath + "_" + folderID
-}
-
-func (e *Exporter) resolveIndexedFolderPath(userID, folderID, fallbackPath string) string {
-	if folderID == "" {
-		return fallbackPath
-	}
-	e.ensureDocPathIndex(userID)
-	if indexed := e.getIndexedPath(userID, folderID); indexed != "" {
-		return indexed
-	}
-	return fallbackPath
-}
-
-func (e *Exporter) readFolderOwner(dirPath, folderName string) (string, bool) {
-	itemPath := filepath.Join(dirPath, sanitizeName(folderName)+".json")
-	if data, err := e.fs.ReadFile(itemPath); err == nil {
-		if parsed, err := MirrorJSONToItem(data); err == nil && model.IsFolder(parsed.ItemType) && parsed.ID != "" {
-			return parsed.ID, true
-		}
-	}
-
-	legacyPath := filepath.Join(dirPath, "_folder.json")
-	if data, err := e.fs.ReadFile(legacyPath); err == nil {
-		if meta, err := JSONToFolder(data); err == nil && meta.ID != "" {
-			return meta.ID, true
-		}
-	}
-
-	if !e.fs.Exists(dirPath) {
-		return "", false
-	}
-	return "", true
-}
-
 func collisionSuffix(itemID string) string {
 	suffix := itemID
 	if len(suffix) > 8 {
@@ -288,34 +160,45 @@ func collisionSuffix(itemID string) string {
 	return suffix
 }
 
-// cleanupOldItemPath 清理同 ID 但舊位置的檔案（改名/搬移情境）
+// cleanupOldItemPath 清理同 ID 但舊位置的投影（改名/搬移情境）。
 func (e *Exporter) cleanupOldItemPath(userID, docID, newPath string) {
 	e.ensureDocPathIndex(userID)
 	oldPath := e.getIndexedPath(userID, docID)
-	if oldPath != "" && oldPath != newPath {
-		_ = e.fs.Remove(oldPath)
+	if oldPath == "" || oldPath == newPath {
+		return
 	}
+
+	_ = e.fs.Remove(oldPath)
+
+	oldDir := strings.TrimSuffix(oldPath, ".json")
+	newDir := strings.TrimSuffix(newPath, ".json")
+	if oldDir == newDir || !e.fs.Exists(oldDir) {
+		return
+	}
+	if !e.fs.Exists(newDir) {
+		if err := e.fs.Rename(oldDir, newDir); err == nil {
+			return
+		}
+	}
+	_ = e.fs.RemoveAll(oldDir)
 }
 
-// DeleteItem 通用刪除：根據 docPathIndex 找到路徑後刪除
+// DeleteItem 通用刪除：刪除 item 的 .json 與同名子目錄。
 func (e *Exporter) DeleteItem(userId, itemID string) error {
 	e.ensureDocPathIndex(userId)
 	oldPath := e.getIndexedPath(userId, itemID)
 	if oldPath == "" {
 		return nil
 	}
-	// 判斷是檔案還是目錄
-	info, err := e.fs.Stat(oldPath)
-	if err != nil {
-		e.removeIndexedPath(userId, itemID)
-		return nil
-	}
-	if info.IsDir() {
-		if err := e.fs.RemoveAll(oldPath); err != nil {
+
+	if e.fs.Exists(oldPath) {
+		if err := e.fs.Remove(oldPath); err != nil {
 			return err
 		}
-	} else {
-		if err := e.fs.Remove(oldPath); err != nil {
+	}
+	dirPath := strings.TrimSuffix(oldPath, ".json")
+	if dirPath != oldPath && e.fs.Exists(dirPath) {
+		if err := e.fs.RemoveAll(dirPath); err != nil {
 			return err
 		}
 	}
@@ -323,41 +206,14 @@ func (e *Exporter) DeleteItem(userId, itemID string) error {
 	return nil
 }
 
-// Deprecated: DeleteFolder 舊版方法，請改用 DeleteItem
+// DeleteFolder 舊介面轉為通用刪除。
 func (e *Exporter) DeleteFolder(userId string, folderID string) error {
-	folderPath, err := e.resolver.ResolveFolderPath(folderID)
-	if err != nil {
-		return fmt.Errorf("resolve folder path: %w", err)
-	}
-	if err := e.fs.RemoveAll(filepath.Join(userId, folderPath)); err != nil {
-		return err
-	}
-	e.removeIndexedPath(userId, folderID)
-	return nil
+	return e.DeleteItem(userId, folderID)
 }
 
-// DeleteNote 刪除 Note 對應的 .md 檔案
+// DeleteNote 舊介面轉為通用刪除。
 func (e *Exporter) DeleteNote(userId string, noteID string, title string, parentFolderID string) error {
-	notePath, err := e.resolver.ResolveNotePath(title, parentFolderID)
-	if err != nil {
-		return fmt.Errorf("resolve note path: %w", err)
-	}
-	if err := e.fs.Remove(filepath.Join(userId, notePath)); err != nil {
-		return err
-	}
-	e.removeIndexedPath(userId, noteID)
-	return nil
-}
-
-// cleanupOldNoteFile 清理同 ID 但路徑不同的舊 .md 檔案。
-// 先掃描新路徑的父目錄（處理標題改名），
-// 再 walk 整個用戶目錄（處理跨資料夾搬移）。
-func (e *Exporter) cleanupOldNoteFile(userId string, noteID string, newFullPath string) {
-	e.ensureDocPathIndex(userId)
-	oldPath := e.getIndexedPath(userId, noteID)
-	if oldPath != "" && oldPath != newFullPath {
-		_ = e.fs.Remove(oldPath)
-	}
+	return e.DeleteItem(userId, noteID)
 }
 
 // ExportBatchEntry 批次匯出項目
@@ -377,12 +233,10 @@ func (e *Exporter) ExportBatch(userId string, entries []ExportBatchEntry) error 
 	for _, entry := range entries {
 		entry := entry
 		g.Go(func() error {
-			// 新格式優先
 			if entry.Item != nil {
 				_, err := e.ExportItem(userId, entry.Item)
 				return err
 			}
-			// 舊格式相容
 			switch {
 			case model.IsFolder(entry.ItemType):
 				if entry.FolderMeta == nil {
@@ -413,24 +267,6 @@ func (e *Exporter) ExportBatch(userId string, entries []ExportBatchEntry) error 
 	return g.Wait()
 }
 
-// cleanupOldFolderPath 清理同 ID 但舊位置的資料夾（搬移/改名情境）
-func (e *Exporter) cleanupOldFolderPath(userID string, folderID string, newFolderPath string) {
-	e.ensureDocPathIndex(userID)
-	oldFolderPath := e.getIndexedPath(userID, folderID)
-	if oldFolderPath != "" && oldFolderPath != newFolderPath {
-		_ = e.fs.RemoveAll(oldFolderPath)
-	}
-}
-
-// cleanupOldCardPath 清理同 ID 但舊位置的 card/chart JSON 檔
-func (e *Exporter) cleanupOldCardPath(userID string, docID string, newPath string) {
-	e.ensureDocPathIndex(userID)
-	oldPath := e.getIndexedPath(userID, docID)
-	if oldPath != "" && oldPath != newPath {
-		_ = e.fs.Remove(oldPath)
-	}
-}
-
 func (e *Exporter) ensureDocPathIndex(userID string) {
 	e.indexMu.RLock()
 	if e.docPathIndex != nil && e.indexUserID == userID {
@@ -458,31 +294,11 @@ func (e *Exporter) ensureDocPathIndex(userID string) {
 		if rErr != nil {
 			return nil
 		}
-		if strings.HasSuffix(path, "_folder.json") {
-			meta, pErr := JSONToFolder(data)
-			if pErr == nil && meta.ID != "" {
-				next[meta.ID] = filepath.Dir(path)
-			}
-			return nil
-		}
-		if strings.HasSuffix(path, ".md") {
-			meta, _, pErr := MarkdownToNote(string(data))
-			if pErr == nil && meta.ID != "" {
-				next[meta.ID] = path
-			}
-			return nil
-		}
 		if strings.HasSuffix(path, ".json") {
-			// 優先嘗試新格式（含 itemType）
 			if mirrorItem, err := MirrorJSONToItem(data); err == nil {
-				if model.IsFolder(mirrorItem.ItemType) {
-					next[mirrorItem.ID] = filepath.Dir(path)
-				} else {
-					next[mirrorItem.ID] = path
-				}
+				next[mirrorItem.ID] = path
 				return nil
 			}
-			// 退回舊格式
 			var payload map[string]interface{}
 			if uErr := json.Unmarshal(data, &payload); uErr == nil {
 				if id, ok := payload["id"].(string); ok && id != "" {
@@ -526,4 +342,125 @@ func (e *Exporter) removeIndexedPath(userID, docID string) {
 		return
 	}
 	delete(e.docPathIndex, docID)
+}
+
+func folderMetaToItem(meta FolderMeta) *model.Item {
+	fields := map[string]interface{}{
+		"folderName": meta.FolderName,
+		"noteNum":    meta.NoteNum,
+		"isTemp":     meta.IsTemp,
+	}
+	itemType := "NOTE_FOLDER"
+	if meta.Type != nil && *meta.Type != "" {
+		itemType = resolveTypeFromItemType(*meta.Type) + "_FOLDER"
+		fields["folderType"] = *meta.Type
+	}
+	if meta.ParentID != nil {
+		fields["parentID"] = *meta.ParentID
+	}
+	if meta.OrderAt != nil {
+		fields["orderAt"] = *meta.OrderAt
+	}
+	if meta.Icon != nil {
+		fields["icon"] = *meta.Icon
+	}
+	if meta.CreatedAt != "" {
+		fields["createdAt"] = meta.CreatedAt
+	}
+	if meta.UpdatedAt != "" {
+		fields["updatedAt"] = meta.UpdatedAt
+	}
+	fields["usn"] = meta.USN
+	return &model.Item{
+		ID:     meta.ID,
+		Name:   meta.FolderName,
+		Type:   itemType,
+		Fields: fields,
+	}
+}
+
+func noteMetaToItem(meta NoteMeta, html string) *model.Item {
+	itemType := meta.Type
+	if itemType == "" {
+		itemType = "NOTE"
+	}
+	fields := map[string]interface{}{
+		"title":     meta.Title,
+		"name":      meta.Title,
+		"parentID":  meta.ParentID,
+		"tags":      meta.Tags,
+		"createdAt": meta.CreatedAt,
+		"updatedAt": meta.UpdatedAt,
+		"isNew":     meta.IsNew,
+		"usn":       meta.USN,
+	}
+	if html != "" {
+		fields["content"] = html
+	}
+	if meta.OrderAt != "" {
+		fields["orderAt"] = meta.OrderAt
+	}
+	if meta.Status != "" {
+		fields["status"] = meta.Status
+	}
+	if meta.AiTitle != "" {
+		fields["aiTitle"] = meta.AiTitle
+	}
+	if meta.AiTags != nil {
+		fields["aiTags"] = meta.AiTags
+	}
+	if meta.ImgURLs != nil {
+		fields["imgURLs"] = meta.ImgURLs
+	}
+	return &model.Item{
+		ID:     meta.ID,
+		Name:   meta.Title,
+		Type:   itemType,
+		Fields: fields,
+	}
+}
+
+func cardMetaToItem(meta CardMeta, itemType string) *model.Item {
+	if itemType == "" {
+		itemType = "CARD"
+	}
+	fields := map[string]interface{}{
+		"parentID": meta.ParentID,
+		"name":     meta.Name,
+		"usn":      meta.USN,
+	}
+	if meta.OrderAt != nil {
+		fields["orderAt"] = *meta.OrderAt
+	}
+	if meta.CreatedAt != "" {
+		fields["createdAt"] = meta.CreatedAt
+	}
+	if meta.UpdatedAt != "" {
+		fields["updatedAt"] = meta.UpdatedAt
+	}
+	if itemType == "CHART" {
+		if meta.Fields != nil {
+			fields["data"] = *meta.Fields
+		}
+	} else {
+		if meta.Fields != nil {
+			fields["fields"] = *meta.Fields
+		}
+		if meta.Reviews != nil {
+			fields["reviews"] = *meta.Reviews
+		}
+		if meta.ContributorID != nil {
+			fields["contributorId"] = *meta.ContributorID
+		}
+		if meta.Coordinates != nil {
+			fields["coordinates"] = *meta.Coordinates
+		}
+		fields["isDeleted"] = meta.IsDeleted
+	}
+	return &model.Item{
+		ID:     meta.ID,
+		Name:   meta.Name,
+		Type:   itemType,
+		Fields: fields,
+	}
 }

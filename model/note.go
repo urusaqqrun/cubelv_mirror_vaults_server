@@ -6,8 +6,7 @@ type Note struct {
 	Title    *string  `bson:"title"`
 	Content   *string  `bson:"content"`
 	Tags      []string `bson:"tags"`
-	FolderID  string   `bson:"folderID"`
-	ParentID  *string  `bson:"parentID,omitempty"`
+	ParentID  string   `bson:"parentID"`
 	Type      string   `bson:"_type,omitempty"`
 	CreateAt  int64    `bson:"createAt"`
 	UpdateAt  int64    `bson:"updateAt"`

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -33,7 +32,7 @@ type DataReader interface {
 	GetCard(ctx context.Context, userID, cardID string) (*model.Card, error)
 	GetChart(ctx context.Context, userID, chartID string) (*model.Chart, error)
 	GetItem(ctx context.Context, userID, itemID string) (*model.Item, error)
-	ListItemFolders(ctx context.Context, userID string) ([]*model.Item, error)
+	ListAllItems(ctx context.Context, userID string) ([]*model.Item, error)
 }
 
 // resolverEntry PathResolver 快取項目
@@ -118,15 +117,13 @@ func (h *SyncEventHandler) HandleEvent(ctx context.Context, event SyncEvent) err
 
 	col := strings.ToLower(event.Collection)
 
-	// item 事件：需先讀取 item 判斷 itemType 再決定是否清除 PathResolver
 	if col == "item" {
 		return h.handleItemEvent(ctx, event)
 	}
 
-	if col == "folder" {
-		h.InvalidateResolver(event.UserID)
-		h.InvalidateDocPathIndex(event.UserID)
-	}
+	// 舊 collection 事件一律視為結構可能改動，直接失效快取。
+	h.InvalidateResolver(event.UserID)
+	h.InvalidateDocPathIndex(event.UserID)
 
 	switch strings.ToLower(event.Action) {
 	case "delete":
@@ -154,11 +151,8 @@ func (h *SyncEventHandler) handleItemEvent(ctx context.Context, event SyncEvent)
 		return nil
 	}
 
-	// 資料夾類型變更時清除 PathResolver 快取
-	if model.IsFolder(item.Type) {
-		h.InvalidateResolver(event.UserID)
-		h.InvalidateDocPathIndex(event.UserID)
-	}
+	h.InvalidateResolver(event.UserID)
+	h.InvalidateDocPathIndex(event.UserID)
 
 	resolver, err := h.getResolver(ctx, event.UserID)
 	if err != nil {
@@ -171,27 +165,33 @@ func (h *SyncEventHandler) handleItemEvent(ctx context.Context, event SyncEvent)
 		return err
 	}
 
-	// 使用 ExportItem 回傳的實際路徑更新 docPathIndex（含衝突後綴）
 	h.setDocPath(event.UserID, item.ID, result.Path, result.IsFolder)
 	return nil
 }
 
-// deleteItemByDocID 刪除 item 對應的 EFS 檔案（先查索引，找不到才全量掃描）
+// deleteItemByDocID 刪除 item 對應的 .json 與同名子目錄。
 func (h *SyncEventHandler) deleteItemByDocID(ctx context.Context, userID, docID string) error {
-	target, isFolder, err := h.findPathByDocID(ctx, userID, docID)
+	target, _, err := h.findPathByDocID(ctx, userID, docID)
 	if err != nil {
 		return err
 	}
 	if target == "" {
 		return nil
 	}
-	if isFolder {
-		h.InvalidateResolver(userID)
-		h.removeDocPath(userID, docID)
-		return h.fs.RemoveAll(target)
+	if h.fs.Exists(target) {
+		if err := h.fs.Remove(target); err != nil {
+			return err
+		}
 	}
+	dirPath := strings.TrimSuffix(target, ".json")
+	if dirPath != target && h.fs.Exists(dirPath) {
+		if err := h.fs.RemoveAll(dirPath); err != nil {
+			return err
+		}
+	}
+	h.InvalidateResolver(userID)
 	h.removeDocPath(userID, docID)
-	return h.fs.Remove(target)
+	return nil
 }
 
 func (h *SyncEventHandler) exportByDocID(ctx context.Context, userID, collection, docID string) error {
@@ -211,8 +211,8 @@ func (h *SyncEventHandler) exportByDocID(ctx context.Context, userID, collection
 		if err := exporter.ExportFolder(userID, meta); err != nil {
 			return err
 		}
-		if p, err := resolver.ResolveFolderPath(meta.ID); err == nil {
-			h.setDocPath(userID, meta.ID, filepath.Join(userID, p), true)
+		if err := h.rebuildDocPathIndex(ctx, userID); err != nil {
+			return err
 		}
 		return nil
 	case "note":
@@ -224,8 +224,8 @@ func (h *SyncEventHandler) exportByDocID(ctx context.Context, userID, collection
 		if err := exporter.ExportNote(userID, meta, n.GetContent()); err != nil {
 			return err
 		}
-		if p, err := resolver.ResolveNotePath(meta.Title, meta.ParentID); err == nil {
-			h.setDocPath(userID, meta.ID, filepath.Join(userID, p), false)
+		if err := h.rebuildDocPathIndex(ctx, userID); err != nil {
+			return err
 		}
 		return nil
 	case "card":
@@ -237,8 +237,8 @@ func (h *SyncEventHandler) exportByDocID(ctx context.Context, userID, collection
 		if err := exporter.ExportCard(userID, meta); err != nil {
 			return err
 		}
-		if p, err := resolver.ResolveCardPath(meta.Name, meta.ParentID); err == nil {
-			h.setDocPath(userID, meta.ID, filepath.Join(userID, p), false)
+		if err := h.rebuildDocPathIndex(ctx, userID); err != nil {
+			return err
 		}
 		return nil
 	case "chart":
@@ -250,8 +250,8 @@ func (h *SyncEventHandler) exportByDocID(ctx context.Context, userID, collection
 		if err := exporter.ExportChart(userID, meta); err != nil {
 			return err
 		}
-		if p, err := resolver.ResolveChartPath(meta.Name, meta.ParentID); err == nil {
-			h.setDocPath(userID, meta.ID, filepath.Join(userID, p), false)
+		if err := h.rebuildDocPathIndex(ctx, userID); err != nil {
+			return err
 		}
 		return nil
 	default:
@@ -260,19 +260,26 @@ func (h *SyncEventHandler) exportByDocID(ctx context.Context, userID, collection
 }
 
 func (h *SyncEventHandler) deleteByDocID(ctx context.Context, userID, collection, docID string) error {
-	target, isFolder, err := h.findPathByDocID(ctx, userID, docID)
+	target, _, err := h.findPathByDocID(ctx, userID, docID)
 	if err != nil {
 		return err
 	}
 	if target == "" {
 		return nil
 	}
-	if isFolder {
-		h.removeDocPath(userID, docID)
-		return h.fs.RemoveAll(target)
+	if h.fs.Exists(target) {
+		if err := h.fs.Remove(target); err != nil {
+			return err
+		}
+	}
+	dirPath := strings.TrimSuffix(target, ".json")
+	if dirPath != target && h.fs.Exists(dirPath) {
+		if err := h.fs.RemoveAll(dirPath); err != nil {
+			return err
+		}
 	}
 	h.removeDocPath(userID, docID)
-	return h.fs.Remove(target)
+	return nil
 }
 
 // getResolver 取得或建立用戶的 PathResolver（帶 TTL 快取）
@@ -285,9 +292,9 @@ func (h *SyncEventHandler) getResolver(ctx context.Context, userID string) (*mir
 	}
 	h.mu.Unlock()
 
-	items, err := h.reader.ListItemFolders(ctx, userID)
+	items, err := h.reader.ListAllItems(ctx, userID)
 	if err != nil {
-		return nil, fmt.Errorf("list item folders: %w", err)
+		return nil, fmt.Errorf("list all items: %w", err)
 	}
 	resolver := buildPathResolverFromItems(items)
 
@@ -298,7 +305,7 @@ func (h *SyncEventHandler) getResolver(ctx context.Context, userID string) (*mir
 	return resolver, nil
 }
 
-// InvalidateResolver 強制清除指定用戶的 PathResolver 快取（folder 變更時呼叫）
+// InvalidateResolver 強制清除指定用戶的 PathResolver 快取。
 func (h *SyncEventHandler) InvalidateResolver(userID string) {
 	h.mu.Lock()
 	delete(h.resolverCache, userID)
@@ -368,31 +375,11 @@ func (h *SyncEventHandler) rebuildDocPathIndex(ctx context.Context, userID strin
 		if rErr != nil {
 			return nil
 		}
-		if strings.HasSuffix(path, "_folder.json") {
-			meta, jErr := mirror.JSONToFolder(data)
-			if jErr == nil && meta.ID != "" {
-				next[meta.ID] = docPathEntry{path: filepath.Dir(path), isFolder: true}
-			}
-			return nil
-		}
-		if strings.HasSuffix(path, ".md") {
-			meta, _, pErr := mirror.MarkdownToNote(string(data))
-			if pErr == nil && meta.ID != "" {
-				next[meta.ID] = docPathEntry{path: path, isFolder: false}
-			}
-			return nil
-		}
 		if strings.HasSuffix(path, ".json") {
-			// 優先嘗試新格式（含 itemType）
 			if mirrorItem, err := mirror.MirrorJSONToItem(data); err == nil {
-				if model.IsFolder(mirrorItem.ItemType) {
-					next[mirrorItem.ID] = docPathEntry{path: filepath.Dir(path), isFolder: true}
-				} else {
-					next[mirrorItem.ID] = docPathEntry{path: path, isFolder: false}
-				}
+				next[mirrorItem.ID] = docPathEntry{path: path, isFolder: model.IsFolder(mirrorItem.ItemType)}
 				return nil
 			}
-			// 退回舊格式
 			var card map[string]any
 			if jErr := json.Unmarshal(data, &card); jErr == nil {
 				if id, ok := card["id"].(string); ok && id != "" {
@@ -426,15 +413,15 @@ func (h *SyncEventHandler) findPathByDocID(ctx context.Context, userID, docID st
 }
 
 func buildPathResolverFromItems(items []*model.Item) *mirror.PathResolver {
-	nodes := make([]mirror.FolderNode, 0, len(items))
+	nodes := make([]mirror.TreeNode, 0, len(items))
 	for _, item := range items {
 		if item == nil {
 			continue
 		}
-		nodes = append(nodes, mirror.FolderNode{
-			ID:         item.ID,
-			FolderName: item.GetName(),
-			Type:       mirror.ItemFolderType(item),
+		nodes = append(nodes, mirror.TreeNode{
+			ID:       item.ID,
+			Name:     item.GetName(),
+			ItemType: item.Type,
 			ParentID:   model.StrPtrField(item.Fields, "parentID"),
 		})
 	}
@@ -504,16 +491,9 @@ func toFolderMeta(f *model.Folder) mirror.FolderMeta {
 }
 
 func toNoteMeta(n *model.Note) mirror.NoteMeta {
-	parent := ""
-	if n.ParentID != nil {
-		parent = *n.ParentID
-	} else {
-		parent = n.FolderID
-	}
 	meta := mirror.NoteMeta{
 		ID:        n.ID,
-		ParentID:  parent,
-		FolderID:  n.FolderID,
+		ParentID:  n.ParentID,
 		Title:     n.GetTitle(),
 		Type:      n.Type,
 		USN:       n.Usn,

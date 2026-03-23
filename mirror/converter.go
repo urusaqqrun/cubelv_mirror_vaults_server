@@ -16,7 +16,6 @@ import (
 type NoteMeta struct {
 	ID        string   `yaml:"id" json:"id"`
 	ParentID  string   `yaml:"parentID" json:"parentID"`
-	FolderID  string   `yaml:"folderID,omitempty" json:"folderID,omitempty"`
 	Title     string   `yaml:"title" json:"title"`
 	Type      string   `yaml:"type,omitempty" json:"type,omitempty"`
 	USN       int      `yaml:"usn" json:"usn"`

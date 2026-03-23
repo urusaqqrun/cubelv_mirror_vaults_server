@@ -73,14 +73,6 @@ func (i *Item) GetName() string {
 	return strField(i.Fields, "name")
 }
 
-// GetFolderID 取得非資料夾 item 所屬的資料夾 ID（優先 folderID，退回 parentID 向後相容）
-func (i *Item) GetFolderID() string {
-	if v := strField(i.Fields, "folderID"); v != "" {
-		return v
-	}
-	return strField(i.Fields, "parentID")
-}
-
 // strField 從 fields map 取出字串值
 func strField(fields map[string]interface{}, key string) string {
 	if fields == nil {

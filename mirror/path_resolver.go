@@ -8,147 +8,109 @@ import (
 	"sync"
 )
 
-// FolderNode 精簡的 Folder 結構，用於路徑解析
-type FolderNode struct {
-	ID         string
-	FolderName string
-	Type       string
-	ParentID   *string
+// TreeNode 精簡的 Item 結構，用於路徑解析。
+type TreeNode struct {
+	ID       string
+	Name     string
+	ItemType string
+	ParentID *string
 }
 
-// PathResolver 根據 parentID 鏈條解析 Vault 檔案路徑（並發安全）
+// PathResolver 根據完整 item parent 鏈條解析 Vault 路徑（並發安全）。
 type PathResolver struct {
 	mu    sync.RWMutex
-	tree  map[string]*FolderNode
-	cache map[string]string // folderID → 已解析的路徑
+	tree  map[string]*TreeNode
+	cache map[string]string // itemID → 已解析的容器路徑
 }
 
-var errFolderNotFoundInTree = errors.New("folder not found in tree")
+var errNodeNotFoundInTree = errors.New("node not found in tree")
 
-func NewPathResolver(folders []FolderNode) *PathResolver {
+func NewPathResolver(nodes []TreeNode) *PathResolver {
 	r := &PathResolver{
-		tree:  make(map[string]*FolderNode, len(folders)),
+		tree:  make(map[string]*TreeNode, len(nodes)),
 		cache: make(map[string]string),
 	}
-	for i := range folders {
-		f := folders[i]
-		r.tree[f.ID] = &f
+	for i := range nodes {
+		node := nodes[i]
+		r.tree[node.ID] = &node
 	}
 	return r
 }
 
-// ResolveFolderPath 解析 Folder 在 Vault 中的路徑（不含 vaultRoot）
-// 回傳格式: "NOTE/工作/會議紀錄"
-// folderID 為空時回傳 "_unsorted"（容許 parentID 缺失的線上資料）
-func (r *PathResolver) ResolveFolderPath(folderID string) (string, error) {
-	if folderID == "" {
+// ResolvePath 解析 item 作為子項容器時的目錄路徑（不含 vaultRoot）。
+// 回傳格式：`NOTE/工作`、`NOTE/工作/筆記A`。
+func (r *PathResolver) ResolvePath(itemID string) (string, error) {
+	if itemID == "" {
 		return "_unsorted", nil
 	}
 
 	r.mu.RLock()
-	if cached, ok := r.cache[folderID]; ok {
+	if cached, ok := r.cache[itemID]; ok {
 		r.mu.RUnlock()
 		return cached, nil
 	}
-	node, ok := r.tree[folderID]
+	_, ok := r.tree[itemID]
 	r.mu.RUnlock()
-
 	if !ok {
 		return "_unsorted", nil
 	}
 
 	r.mu.RLock()
-	parts, err := r.buildPathParts(folderID, make(map[string]bool))
+	parts, err := r.buildPathParts(itemID, make(map[string]bool))
 	r.mu.RUnlock()
 	if err != nil {
-		if errors.Is(err, errFolderNotFoundInTree) {
+		if errors.Is(err, errNodeNotFoundInTree) {
 			return "_unsorted", nil
 		}
 		return "", err
 	}
 
-	typeName := resolveType(node.Type)
-	result := filepath.Join(append([]string{typeName}, parts...)...)
+	result := filepath.Join(parts...)
 
 	r.mu.Lock()
-	r.cache[folderID] = result
+	r.cache[itemID] = result
 	r.mu.Unlock()
 	return result, nil
 }
 
-// ResolveItemPath 解析任意 Item 在 Vault 中的路徑（通用方法，回傳 TYPE/.../name.json）
-func (r *PathResolver) ResolveItemPath(itemName string, folderID string) (string, error) {
-	folderPath, err := r.ResolveFolderPath(folderID)
-	if err != nil {
-		return "", fmt.Errorf("resolve item parent: %w", err)
-	}
-	return filepath.Join(folderPath, sanitizeName(itemName)+".json"), nil
-}
-
-// Deprecated: ResolveNotePath 舊版方法，請改用 ResolveItemPath
-func (r *PathResolver) ResolveNotePath(noteTitle string, parentFolderID string) (string, error) {
-	folderPath, err := r.ResolveFolderPath(parentFolderID)
-	if err != nil {
-		return "", fmt.Errorf("resolve note parent: %w", err)
-	}
-	return filepath.Join(folderPath, sanitizeName(noteTitle)+".md"), nil
-}
-
-// Deprecated: ResolveCardPath 舊版方法，請改用 ResolveItemPath
-func (r *PathResolver) ResolveCardPath(cardName string, parentFolderID string) (string, error) {
-	folderPath, err := r.ResolveFolderPath(parentFolderID)
-	if err != nil {
-		return "", fmt.Errorf("resolve card parent: %w", err)
-	}
-	return filepath.Join(folderPath, sanitizeName(cardName)+".json"), nil
-}
-
-// Deprecated: ResolveChartPath 舊版方法，請改用 ResolveItemPath
-func (r *PathResolver) ResolveChartPath(chartName string, parentFolderID string) (string, error) {
-	folderPath, err := r.ResolveFolderPath(parentFolderID)
-	if err != nil {
-		return "", fmt.Errorf("resolve chart parent: %w", err)
-	}
-	return filepath.Join(folderPath, sanitizeName(chartName)+".json"), nil
-}
-
-func (r *PathResolver) AddFolder(folder FolderNode) {
+func (r *PathResolver) AddNode(node TreeNode) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.tree[folder.ID] = &folder
+	r.tree[node.ID] = &node
 	r.invalidateCache()
 }
 
-func (r *PathResolver) RemoveFolder(folderID string) {
+func (r *PathResolver) RemoveNode(nodeID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	delete(r.tree, folderID)
+	delete(r.tree, nodeID)
 	r.invalidateCache()
 }
 
-func (r *PathResolver) UpdateFolder(folder FolderNode) {
+func (r *PathResolver) UpdateNode(node TreeNode) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.tree[folder.ID] = &folder
+	r.tree[node.ID] = &node
 	r.invalidateCache()
 }
 
-// buildPathParts 遞迴向上取得 folderName 路徑片段（不含 type 前綴）
-func (r *PathResolver) buildPathParts(folderID string, visited map[string]bool) ([]string, error) {
-	if visited[folderID] {
-		return nil, fmt.Errorf("circular reference detected at folder %q", folderID)
+// buildPathParts 遞迴向上取得 item 容器路徑片段。
+func (r *PathResolver) buildPathParts(nodeID string, visited map[string]bool) ([]string, error) {
+	if visited[nodeID] {
+		return nil, fmt.Errorf("circular reference detected at node %q", nodeID)
 	}
-	visited[folderID] = true
+	visited[nodeID] = true
 
-	node, ok := r.tree[folderID]
+	node, ok := r.tree[nodeID]
 	if !ok {
-		return nil, fmt.Errorf("%w: %q", errFolderNotFoundInTree, folderID)
+		return nil, fmt.Errorf("%w: %q", errNodeNotFoundInTree, nodeID)
 	}
 
-	name := sanitizeName(node.FolderName)
+	name := sanitizeName(node.Name)
 
 	if node.ParentID == nil || *node.ParentID == "" {
-		return []string{name}, nil
+		typeName := resolveTypeFromItemType(node.ItemType)
+		return []string{typeName, name}, nil
 	}
 
 	parentParts, err := r.buildPathParts(*node.ParentID, visited)
@@ -163,12 +125,15 @@ func (r *PathResolver) invalidateCache() {
 	r.cache = make(map[string]string)
 }
 
-// resolveType 從資料夾子類型取得根目錄名（通用化：任何非空值直接使用，空值預設 NOTE）
-func resolveType(t string) string {
-	if t == "" {
+// resolveTypeFromItemType 將 itemType 對應到 Vault 根目錄。
+func resolveTypeFromItemType(itemType string) string {
+	if itemType == "" {
 		return "NOTE"
 	}
-	return t
+	if strings.HasSuffix(itemType, "_FOLDER") {
+		return strings.TrimSuffix(itemType, "_FOLDER")
+	}
+	return itemType
 }
 
 // SanitizeItemName 將不安全的檔名字元替換為底線（exported 供其他 package 使用）

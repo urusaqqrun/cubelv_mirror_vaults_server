@@ -358,9 +358,6 @@ func noteMetaToItemDoc(m *mirror.NoteMeta, body string, usn int) Doc {
 	if m.CreatedAt != "" {
 		fields["createdAt"] = parseTimestamp(m.CreatedAt)
 	}
-	if m.FolderID != "" {
-		fields["folderID"] = m.FolderID
-	}
 	if m.OrderAt != "" {
 		fields["orderAt"] = m.OrderAt
 	}
@@ -615,9 +612,6 @@ func noteMetaToDoc(m *mirror.NoteMeta, body string) Doc {
 		if v, err := strconv.ParseInt(m.CreatedAt, 10, 64); err == nil {
 			doc["createAt"] = v
 		}
-	}
-	if m.FolderID != "" {
-		doc["folderID"] = m.FolderID
 	}
 	if m.Type != "" {
 		doc["_type"] = m.Type

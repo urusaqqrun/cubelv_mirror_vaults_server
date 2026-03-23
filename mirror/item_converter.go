@@ -11,16 +11,9 @@ import (
 // ItemToNoteMeta 將 Item（NOTE/TODO）轉換為 NoteMeta + HTML content
 func ItemToNoteMeta(item *model.Item) (NoteMeta, string) {
 	f := item.Fields
-	parentID := model.StrPtrDeref(model.StrPtrField(f, "parentID"))
-	folderID := strFieldDefault(f, "folderID", "")
-	// parentID 為空時退回 folderID（相容舊資料）
-	if parentID == "" {
-		parentID = folderID
-	}
 	meta := NoteMeta{
 		ID:        item.ID,
-		ParentID:  parentID,
-		FolderID:  folderID,
+		ParentID:  item.GetParentID(),
 		Title:     item.GetTitle(),
 		Type:      item.Type,
 		USN:       item.GetUSN(),
@@ -145,18 +138,6 @@ func ItemToMirrorData(item *model.Item) ItemMirrorData {
 		ItemType: item.Type,
 		Fields:   fields,
 	}
-}
-
-// ItemFolderType 回傳 FOLDER item 的子類型（NOTE/CARD/CHART），用於 PathResolver。
-// 優先從 itemType（NOTE_FOLDER→NOTE）推斷，再看 fields.folderType，預設 NOTE。
-func ItemFolderType(item *model.Item) string {
-	if sub := model.FolderSubType(item.Type); sub != "" {
-		return sub
-	}
-	if v := model.StrPtrField(item.Fields, "folderType"); v != nil {
-		return *v
-	}
-	return "NOTE"
 }
 
 func strFieldDefault(fields map[string]interface{}, key, def string) string {

@@ -183,7 +183,7 @@ func TestItemToMirrorData_BasicConversion(t *testing.T) {
 		Type: "KANBAN",
 		Fields: map[string]interface{}{
 			"color":    "blue",
-			"folderID": "f1",
+			"parentID": "f1",
 		},
 	}
 	data := ItemToMirrorData(item)
@@ -232,21 +232,21 @@ func TestItemToMirrorData_DeepCopyFields(t *testing.T) {
 	}
 }
 
-func TestItemToNoteMeta_ParentIDAndUpdatedAtFallback(t *testing.T) {
+func TestItemToNoteMeta_ParentIDAndUpdatedAt(t *testing.T) {
 	item := &model.Item{
 		ID:   "n1",
 		Type: model.ItemTypeNote,
 		Fields: map[string]interface{}{
 			"name":      "舊資料",
-			"folderID":  "legacy-folder",
+			"parentID":  "note-parent",
 			"usn":       1,
 			"createdAt": int64(1700000000000),
 			"updateAt":  int64(1709000000000),
 		},
 	}
 	meta, _ := ItemToNoteMeta(item)
-	if meta.ParentID != "legacy-folder" {
-		t.Fatalf("parentID fallback failed: got %q", meta.ParentID)
+	if meta.ParentID != "note-parent" {
+		t.Fatalf("parentID read failed: got %q", meta.ParentID)
 	}
 	if meta.UpdatedAt != "1709000000000" {
 		t.Fatalf("updatedAt fallback failed: got %q", meta.UpdatedAt)

@@ -6,11 +6,11 @@ import (
 
 func strPtr(s string) *string { return &s }
 
-func TestResolveFolderPath_TopLevel(t *testing.T) {
-	r := NewPathResolver([]FolderNode{
-		{ID: "f1", FolderName: "工作", Type: "NOTE", ParentID: nil},
+func TestResolvePath_TopLevel(t *testing.T) {
+	r := NewPathResolver([]TreeNode{
+		{ID: "f1", Name: "工作", ItemType: "NOTE_FOLDER", ParentID: nil},
 	})
-	got, err := r.ResolveFolderPath("f1")
+	got, err := r.ResolvePath("f1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -19,12 +19,12 @@ func TestResolveFolderPath_TopLevel(t *testing.T) {
 	}
 }
 
-func TestResolveFolderPath_Nested(t *testing.T) {
-	r := NewPathResolver([]FolderNode{
-		{ID: "f1", FolderName: "工作", Type: "NOTE", ParentID: nil},
-		{ID: "f2", FolderName: "會議紀錄", Type: "NOTE", ParentID: strPtr("f1")},
+func TestResolvePath_Nested(t *testing.T) {
+	r := NewPathResolver([]TreeNode{
+		{ID: "f1", Name: "工作", ItemType: "NOTE_FOLDER", ParentID: nil},
+		{ID: "f2", Name: "會議紀錄", ItemType: "NOTE", ParentID: strPtr("f1")},
 	})
-	got, err := r.ResolveFolderPath("f2")
+	got, err := r.ResolvePath("f2")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,13 +33,13 @@ func TestResolveFolderPath_Nested(t *testing.T) {
 	}
 }
 
-func TestResolveFolderPath_DeeplyNested(t *testing.T) {
-	r := NewPathResolver([]FolderNode{
-		{ID: "f1", FolderName: "工作", Type: "NOTE", ParentID: nil},
-		{ID: "f2", FolderName: "專案", Type: "NOTE", ParentID: strPtr("f1")},
-		{ID: "f3", FolderName: "前端", Type: "NOTE", ParentID: strPtr("f2")},
+func TestResolvePath_DeeplyNested(t *testing.T) {
+	r := NewPathResolver([]TreeNode{
+		{ID: "f1", Name: "工作", ItemType: "NOTE_FOLDER", ParentID: nil},
+		{ID: "f2", Name: "專案", ItemType: "NOTE", ParentID: strPtr("f1")},
+		{ID: "f3", Name: "前端", ItemType: "NOTE", ParentID: strPtr("f2")},
 	})
-	got, err := r.ResolveFolderPath("f3")
+	got, err := r.ResolvePath("f3")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,22 +48,22 @@ func TestResolveFolderPath_DeeplyNested(t *testing.T) {
 	}
 }
 
-func TestResolveFolderPath_DifferentTypes(t *testing.T) {
+func TestResolvePath_DifferentTypes(t *testing.T) {
 	tests := []struct {
 		name     string
-		folder   FolderNode
+		node     TreeNode
 		expected string
 	}{
-		{"CARD", FolderNode{ID: "c1", FolderName: "讀書卡片", Type: "CARD", ParentID: nil}, "CARD/讀書卡片"},
-		{"CHART", FolderNode{ID: "ch1", FolderName: "月報圖表", Type: "CHART", ParentID: nil}, "CHART/月報圖表"},
-		{"TODO", FolderNode{ID: "t1", FolderName: "待辦清單", Type: "TODO", ParentID: nil}, "TODO/待辦清單"},
-		{"NOTE", FolderNode{ID: "n1", FolderName: "筆記", Type: "NOTE", ParentID: nil}, "NOTE/筆記"},
-		{"empty type defaults to NOTE", FolderNode{ID: "e1", FolderName: "雜記", Type: "", ParentID: nil}, "NOTE/雜記"},
+		{"CARD root", TreeNode{ID: "c1", Name: "讀書卡片", ItemType: "CARD_FOLDER", ParentID: nil}, "CARD/讀書卡片"},
+		{"CHART root", TreeNode{ID: "ch1", Name: "月報圖表", ItemType: "CHART_FOLDER", ParentID: nil}, "CHART/月報圖表"},
+		{"TODO root", TreeNode{ID: "t1", Name: "待辦清單", ItemType: "TODO", ParentID: nil}, "TODO/待辦清單"},
+		{"NOTE root", TreeNode{ID: "n1", Name: "筆記", ItemType: "NOTE", ParentID: nil}, "NOTE/筆記"},
+		{"empty type defaults to NOTE", TreeNode{ID: "e1", Name: "雜記", ItemType: "", ParentID: nil}, "NOTE/雜記"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := NewPathResolver([]FolderNode{tt.folder})
-			got, err := r.ResolveFolderPath(tt.folder.ID)
+			r := NewPathResolver([]TreeNode{tt.node})
+			got, err := r.ResolvePath(tt.node.ID)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -74,51 +74,11 @@ func TestResolveFolderPath_DifferentTypes(t *testing.T) {
 	}
 }
 
-func TestResolveNotePath(t *testing.T) {
-	r := NewPathResolver([]FolderNode{
-		{ID: "f1", FolderName: "工作", Type: "NOTE", ParentID: nil},
-		{ID: "f2", FolderName: "會議紀錄", Type: "NOTE", ParentID: strPtr("f1")},
+func TestResolvePath_OrphanParentID(t *testing.T) {
+	r := NewPathResolver([]TreeNode{
+		{ID: "f1", Name: "孤兒", ItemType: "NOTE", ParentID: strPtr("nonexistent")},
 	})
-	got, err := r.ResolveNotePath("今日會議", "f2")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != "NOTE/工作/會議紀錄/今日會議.md" {
-		t.Errorf("got %q, want %q", got, "NOTE/工作/會議紀錄/今日會議.md")
-	}
-}
-
-func TestResolveCardPath(t *testing.T) {
-	r := NewPathResolver([]FolderNode{
-		{ID: "c1", FolderName: "美食清單", Type: "CARD", ParentID: nil},
-	})
-	got, err := r.ResolveCardPath("鼎泰豐", "c1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != "CARD/美食清單/鼎泰豐.json" {
-		t.Errorf("got %q, want %q", got, "CARD/美食清單/鼎泰豐.json")
-	}
-}
-
-func TestResolveChartPath(t *testing.T) {
-	r := NewPathResolver([]FolderNode{
-		{ID: "ch1", FolderName: "月營收圖表", Type: "CHART", ParentID: nil},
-	})
-	got, err := r.ResolveChartPath("2024年Q4", "ch1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != "CHART/月營收圖表/2024年Q4.json" {
-		t.Errorf("got %q, want %q", got, "CHART/月營收圖表/2024年Q4.json")
-	}
-}
-
-func TestResolveFolderPath_OrphanParentID(t *testing.T) {
-	r := NewPathResolver([]FolderNode{
-		{ID: "f1", FolderName: "孤兒", Type: "NOTE", ParentID: strPtr("nonexistent")},
-	})
-	got, err := r.ResolveFolderPath("f1")
+	got, err := r.ResolvePath("f1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -127,20 +87,20 @@ func TestResolveFolderPath_OrphanParentID(t *testing.T) {
 	}
 }
 
-func TestResolveFolderPath_CircularReference(t *testing.T) {
-	r := NewPathResolver([]FolderNode{
-		{ID: "f1", FolderName: "A", Type: "NOTE", ParentID: strPtr("f2")},
-		{ID: "f2", FolderName: "B", Type: "NOTE", ParentID: strPtr("f1")},
+func TestResolvePath_CircularReference(t *testing.T) {
+	r := NewPathResolver([]TreeNode{
+		{ID: "f1", Name: "A", ItemType: "NOTE", ParentID: strPtr("f2")},
+		{ID: "f2", Name: "B", ItemType: "NOTE", ParentID: strPtr("f1")},
 	})
-	_, err := r.ResolveFolderPath("f1")
+	_, err := r.ResolvePath("f1")
 	if err == nil {
 		t.Error("expected error for circular reference, got nil")
 	}
 }
 
-func TestResolveFolderPath_NotFound(t *testing.T) {
-	r := NewPathResolver([]FolderNode{})
-	got, err := r.ResolveFolderPath("nonexistent")
+func TestResolvePath_NotFound(t *testing.T) {
+	r := NewPathResolver([]TreeNode{})
+	got, err := r.ResolvePath("nonexistent")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -149,11 +109,11 @@ func TestResolveFolderPath_NotFound(t *testing.T) {
 	}
 }
 
-func TestResolveFolderPath_EmptyID(t *testing.T) {
-	r := NewPathResolver([]FolderNode{
-		{ID: "f1", FolderName: "工作", Type: "NOTE", ParentID: nil},
+func TestResolvePath_EmptyID(t *testing.T) {
+	r := NewPathResolver([]TreeNode{
+		{ID: "f1", Name: "工作", ItemType: "NOTE_FOLDER", ParentID: nil},
 	})
-	got, err := r.ResolveFolderPath("")
+	got, err := r.ResolvePath("")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -162,13 +122,13 @@ func TestResolveFolderPath_EmptyID(t *testing.T) {
 	}
 }
 
-func TestAddFolder_UpdatesTree(t *testing.T) {
-	r := NewPathResolver([]FolderNode{
-		{ID: "f1", FolderName: "工作", Type: "NOTE", ParentID: nil},
+func TestAddNode_UpdatesTree(t *testing.T) {
+	r := NewPathResolver([]TreeNode{
+		{ID: "f1", Name: "工作", ItemType: "NOTE_FOLDER", ParentID: nil},
 	})
-	r.AddFolder(FolderNode{ID: "f2", FolderName: "新專案", Type: "NOTE", ParentID: strPtr("f1")})
+	r.AddNode(TreeNode{ID: "f2", Name: "新專案", ItemType: "NOTE", ParentID: strPtr("f1")})
 
-	got, err := r.ResolveFolderPath("f2")
+	got, err := r.ResolvePath("f2")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,14 +137,14 @@ func TestAddFolder_UpdatesTree(t *testing.T) {
 	}
 }
 
-func TestRemoveFolder(t *testing.T) {
-	r := NewPathResolver([]FolderNode{
-		{ID: "f1", FolderName: "工作", Type: "NOTE", ParentID: nil},
-		{ID: "f2", FolderName: "會議", Type: "NOTE", ParentID: strPtr("f1")},
+func TestRemoveNode(t *testing.T) {
+	r := NewPathResolver([]TreeNode{
+		{ID: "f1", Name: "工作", ItemType: "NOTE_FOLDER", ParentID: nil},
+		{ID: "f2", Name: "會議", ItemType: "NOTE", ParentID: strPtr("f1")},
 	})
-	r.RemoveFolder("f2")
+	r.RemoveNode("f2")
 
-	got, err := r.ResolveFolderPath("f2")
+	got, err := r.ResolvePath("f2")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -193,14 +153,14 @@ func TestRemoveFolder(t *testing.T) {
 	}
 }
 
-func TestUpdateFolder(t *testing.T) {
-	r := NewPathResolver([]FolderNode{
-		{ID: "f1", FolderName: "工作", Type: "NOTE", ParentID: nil},
-		{ID: "f2", FolderName: "舊名", Type: "NOTE", ParentID: strPtr("f1")},
+func TestUpdateNode(t *testing.T) {
+	r := NewPathResolver([]TreeNode{
+		{ID: "f1", Name: "工作", ItemType: "NOTE_FOLDER", ParentID: nil},
+		{ID: "f2", Name: "舊名", ItemType: "NOTE", ParentID: strPtr("f1")},
 	})
-	r.UpdateFolder(FolderNode{ID: "f2", FolderName: "新名", Type: "NOTE", ParentID: strPtr("f1")})
+	r.UpdateNode(TreeNode{ID: "f2", Name: "新名", ItemType: "NOTE", ParentID: strPtr("f1")})
 
-	got, err := r.ResolveFolderPath("f2")
+	got, err := r.ResolvePath("f2")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,11 +169,11 @@ func TestUpdateFolder(t *testing.T) {
 	}
 }
 
-func TestResolveFolderPath_SpecialCharactersInName(t *testing.T) {
-	r := NewPathResolver([]FolderNode{
-		{ID: "f1", FolderName: "工作/專案", Type: "NOTE", ParentID: nil},
+func TestResolvePath_SpecialCharactersInName(t *testing.T) {
+	r := NewPathResolver([]TreeNode{
+		{ID: "f1", Name: "工作/專案", ItemType: "NOTE_FOLDER", ParentID: nil},
 	})
-	got, err := r.ResolveFolderPath("f1")
+	got, err := r.ResolvePath("f1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,11 +183,11 @@ func TestResolveFolderPath_SpecialCharactersInName(t *testing.T) {
 	}
 }
 
-func TestResolveFolderPath_EmptyFolderName(t *testing.T) {
-	r := NewPathResolver([]FolderNode{
-		{ID: "f1", FolderName: "", Type: "NOTE", ParentID: nil},
+func TestResolvePath_EmptyName(t *testing.T) {
+	r := NewPathResolver([]TreeNode{
+		{ID: "f1", Name: "", ItemType: "NOTE_FOLDER", ParentID: nil},
 	})
-	got, err := r.ResolveFolderPath("f1")
+	got, err := r.ResolvePath("f1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -236,19 +196,17 @@ func TestResolveFolderPath_EmptyFolderName(t *testing.T) {
 	}
 }
 
-func TestResolveFolderPath_CacheInvalidation(t *testing.T) {
-	r := NewPathResolver([]FolderNode{
-		{ID: "f1", FolderName: "工作", Type: "NOTE", ParentID: nil},
-		{ID: "f2", FolderName: "子目錄", Type: "NOTE", ParentID: strPtr("f1")},
+func TestResolvePath_CacheInvalidation(t *testing.T) {
+	r := NewPathResolver([]TreeNode{
+		{ID: "f1", Name: "工作", ItemType: "NOTE_FOLDER", ParentID: nil},
+		{ID: "f2", Name: "子目錄", ItemType: "NOTE", ParentID: strPtr("f1")},
 	})
 
-	// 先解析一次，快取結果
-	_, _ = r.ResolveFolderPath("f2")
+	_, _ = r.ResolvePath("f2")
 
-	// 更新父 Folder 名稱
-	r.UpdateFolder(FolderNode{ID: "f1", FolderName: "生活", Type: "NOTE", ParentID: nil})
+	r.UpdateNode(TreeNode{ID: "f1", Name: "生活", ItemType: "NOTE_FOLDER", ParentID: nil})
 
-	got, err := r.ResolveFolderPath("f2")
+	got, err := r.ResolvePath("f2")
 	if err != nil {
 		t.Fatal(err)
 	}

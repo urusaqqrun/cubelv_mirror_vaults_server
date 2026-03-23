@@ -613,13 +613,7 @@ func itemToNote(item *model.Item) *model.Note {
 		Title:   model.StrPtrField(item.Fields, "title"),
 		Content: model.StrPtrField(item.Fields, "content"),
 		Tags:    model.StringSliceField(item.Fields, "tags"),
-		FolderID: func() string {
-			if v := model.StrPtrField(item.Fields, "folderID"); v != nil {
-				return *v
-			}
-			return ""
-		}(),
-		ParentID: model.StrPtrField(item.Fields, "parentID"),
+		ParentID: model.StrPtrDeref(model.StrPtrField(item.Fields, "parentID")),
 		Usn:      item.GetUSN(),
 		CreateAt: model.Int64Field(item.Fields, "createdAt"),
 		UpdateAt: model.Int64Field(item.Fields, "updatedAt"),
