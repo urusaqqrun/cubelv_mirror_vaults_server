@@ -199,8 +199,11 @@ func (h *WsHandler) handleMessage(session *WsSession, sessionKey string, msg map
 			continue
 		}
 
+		log.Printf("[WS-CLI] raw line: %s", event.Data[:min(len(event.Data), 200)])
+
 		var parsed map[string]interface{}
 		if err := json.Unmarshal([]byte(event.Data), &parsed); err != nil {
+			log.Printf("[WS-CLI] parse error: %v for line: %s", err, event.Data[:min(len(event.Data), 100)])
 			continue
 		}
 
