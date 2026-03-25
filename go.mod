@@ -5,6 +5,7 @@ go 1.25.3
 require (
 	github.com/JohannesKaufmann/html-to-markdown/v2 v2.5.0
 	github.com/alicebob/miniredis/v2 v2.37.0
+	github.com/gorilla/websocket v1.5.3
 	github.com/lib/pq v1.11.2
 	github.com/redis/go-redis/v9 v9.18.0
 	github.com/yuin/goldmark v1.7.16

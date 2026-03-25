@@ -105,6 +105,10 @@ func main() {
 	chatHandler := api.NewChatHandler(pgStore)
 	chatHandler.RegisterRoutes(mux)
 
+	wsHandler := api.NewWsHandler(taskExec, taskStore, pgStore)
+	wsHandler.RegisterRoutes(mux)
+	chatHandler.SetWsHandler(wsHandler)
+
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		resp := map[string]interface{}{
 			"status": "ok",
@@ -282,6 +286,83 @@ func (e *fullTaskExecutor) Execute(task *api.Task) error {
 			if syncErr := e.usnSyncer.SyncUserUSN(execCtx, task.UserID); syncErr != nil {
 				log.Printf("[Task %s] SyncUserUSN error: %v", task.ID, syncErr)
 			}
+		}
+	}
+
+	return nil
+}
+
+// ExecuteStream runs the full vault pipeline with streaming Claude CLI output.
+func (e *fullTaskExecutor) ExecuteStream(task *api.Task, eventCh chan<- executor.StreamEvent) error {
+	workDir := fmt.Sprintf("%s/%s", e.vaultRoot, task.UserID)
+
+	if !e.vaultLock.Lock(task.UserID, task.ID) {
+		return fmt.Errorf("user vault is locked by another task")
+	}
+	defer e.vaultLock.Unlock(task.UserID, task.ID)
+
+	e.vaultFS.MkdirAll(task.UserID)
+
+	execCtx := e.ctx
+	if execCtx == nil {
+		execCtx = context.Background()
+	}
+
+	// Ensure Vault is initialised
+	if e.fullExporter != nil && !e.vaultFS.Exists(task.UserID+"/CLAUDE.md") {
+		if err := vaultsync.ExportFullVault(execCtx, e.vaultFS, e.fullExporter, task.UserID); err != nil {
+			log.Printf("[Task %s] full export error: %v", task.ID, err)
+		}
+	}
+
+	aiStartUSN := 0
+	if e.latestUSN != nil {
+		if usn, usnErr := e.latestUSN.GetLatestUSN(execCtx, task.UserID); usnErr == nil {
+			aiStartUSN = usn
+		}
+	}
+
+	beforeSnap, beforeIDMap, snapErr := executor.TakeSnapshotAndPathIDMap(e.vaultFS, task.UserID)
+	if snapErr != nil {
+		return fmt.Errorf("snapshot before error: %w", snapErr)
+	}
+
+	// Claude CLI streaming
+	err := e.claudeExec.ExecuteTaskStream(
+		execCtx, task.ID, workDir, task.Instruction, task.Scope, task.UserID, eventCh,
+	)
+	if err != nil {
+		return err
+	}
+
+	// diff + writeback
+	afterSnap, snapErr := executor.TakeSnapshot(e.vaultFS, task.UserID)
+	if snapErr != nil {
+		return fmt.Errorf("snapshot after error: %w", snapErr)
+	}
+	diff := executor.ComputeDiff(beforeSnap, afterSnap)
+	hasChanges := len(diff.Created)+len(diff.Modified)+len(diff.Deleted)+len(diff.Moved) > 0
+	if !hasChanges {
+		return nil
+	}
+
+	importer := mirror.NewImporter(e.vaultFS)
+	movedEntries := make([]mirror.MovedFileEntry, len(diff.Moved))
+	for i, m := range diff.Moved {
+		movedEntries[i] = mirror.MovedFileEntry{OldPath: m.OldPath, NewPath: m.NewPath}
+	}
+	entries, parseErr := importer.ProcessDiff(task.UserID, diff.Created, diff.Modified, diff.Deleted, movedEntries, beforeIDMap)
+	if parseErr != nil {
+		return fmt.Errorf("parse diff error: %w", parseErr)
+	}
+
+	if e.writer != nil && len(entries) > 0 {
+		result := executor.WriteBack(execCtx, e.writer, e.usnReader, e.usnInc, task.UserID, entries, aiStartUSN)
+		log.Printf("[Task %s] writeback: +%d ~%d mv%d -%d skip%d err%d",
+			task.ID, result.Created, result.Updated, result.Moved, result.Deleted, result.Skipped, result.Errors)
+
+		if e.usnSyncer != nil {
+			_ = e.usnSyncer.SyncUserUSN(execCtx, task.UserID)
 		}
 	}
 

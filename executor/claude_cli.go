@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"log"
@@ -124,6 +125,112 @@ func (e *ClaudeExecutor) ActiveCount() int {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return len(e.processes)
+}
+
+// StreamEvent represents a single event from the Claude CLI streaming output.
+type StreamEvent struct {
+	Type string // "stdout", "error", "done"
+	Data string
+}
+
+// ExecuteTaskStream runs the Claude CLI in streaming mode (--output-format stream-json)
+// and sends each stdout line as a StreamEvent to eventCh. The caller must consume eventCh.
+func (e *ClaudeExecutor) ExecuteTaskStream(
+	ctx context.Context,
+	taskID, workDir, instruction, scope, userID string,
+	eventCh chan<- StreamEvent,
+) error {
+	select {
+	case e.sem <- struct{}{}:
+		atomic.AddInt32(&e.running, 1)
+		defer func() {
+			<-e.sem
+			atomic.AddInt32(&e.running, -1)
+		}()
+	case <-ctx.Done():
+		return fmt.Errorf("task %s cancelled while waiting in queue", taskID)
+	}
+
+	execCtx, cancel := context.WithTimeout(ctx, e.timeout)
+	defer cancel()
+
+	claudeMD := buildClaudeMD(instruction)
+
+	args := []string{
+		"--dangerously-skip-permissions",
+		"--output-format", "stream-json",
+		"-p", claudeMD,
+	}
+
+	cmd := exec.CommandContext(execCtx, "claude", args...)
+	cmd.Dir = workDir
+	cmd.Env = append(os.Environ(),
+		"TASK_SCOPE="+scope,
+		"VAULT_USER_ID="+userID,
+	)
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("stdout pipe: %w", err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("stderr pipe: %w", err)
+	}
+
+	e.mu.Lock()
+	e.processes[taskID] = cmd
+	e.mu.Unlock()
+	defer func() {
+		e.mu.Lock()
+		delete(e.processes, taskID)
+		e.mu.Unlock()
+	}()
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start claude cli: %w", err)
+	}
+
+	var stderrBuf strings.Builder
+	stderrDone := make(chan struct{})
+	go func() {
+		defer close(stderrDone)
+		scanner := bufio.NewScanner(stderr)
+		scanner.Buffer(make([]byte, 256*1024), 256*1024)
+		for scanner.Scan() {
+			stderrBuf.WriteString(scanner.Text() + "\n")
+		}
+	}()
+
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 256*1024), 256*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+		select {
+		case eventCh <- StreamEvent{Type: "stdout", Data: line}:
+		case <-execCtx.Done():
+			return execCtx.Err()
+		}
+	}
+
+	<-stderrDone
+	waitErr := cmd.Wait()
+
+	if execCtx.Err() == context.DeadlineExceeded {
+		return fmt.Errorf("task %s timed out after %v", taskID, e.timeout)
+	}
+	if waitErr != nil {
+		errMsg := stderrBuf.String()
+		if len(errMsg) > 500 {
+			errMsg = errMsg[:500]
+		}
+		return fmt.Errorf("claude cli exit code %d: %s", cmd.ProcessState.ExitCode(), errMsg)
+	}
+
+	return nil
 }
 
 func buildClaudeMD(instruction string) string {

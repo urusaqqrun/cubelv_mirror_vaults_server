@@ -9,7 +9,7 @@ import (
 	"github.com/urusaqqrun/vault-mirror-service/database"
 )
 
-// ChatStore defines the database operations required by ChatHandler.
+// ChatStore defines the database operations required by ChatHandler and WsHandler.
 // PgStore satisfies this interface.
 type ChatStore interface {
 	GetMessagesAfter(ctx context.Context, threadID, mode, cursorID string, limit int) ([]database.ChatMessage, bool, error)
@@ -17,16 +17,23 @@ type ChatStore interface {
 	GetThreadsByMemberID(ctx context.Context, memberID, mode string) ([]database.ThreadInfo, error)
 	AddThreadMapping(ctx context.Context, memberID, threadID, title, mode string) error
 	DeleteUserThreads(ctx context.Context, memberID string) (int, int, error)
+	InsertChatMessage(ctx context.Context, msg *database.ChatMessage) error
 }
 
 // ChatHandler serves the chat-related REST API endpoints.
 type ChatHandler struct {
-	store ChatStore
+	store     ChatStore
+	wsHandler *WsHandler
 }
 
 // NewChatHandler creates a ChatHandler backed by the given store.
 func NewChatHandler(store ChatStore) *ChatHandler {
 	return &ChatHandler{store: store}
+}
+
+// SetWsHandler sets the WebSocket handler for session status lookups.
+func (h *ChatHandler) SetWsHandler(ws *WsHandler) {
+	h.wsHandler = ws
 }
 
 // RegisterRoutes registers all chat-related routes on the provided mux.
@@ -143,7 +150,8 @@ func (h *ChatHandler) AddThread(w http.ResponseWriter, r *http.Request) {
 }
 
 // GetSessionStatus returns the session status for a member/thread.
-// Phase 2 will implement WebSocket session management; for now, always returns "idle".
+// When a WsHandler is configured, it queries the live WebSocket session;
+// otherwise it returns "idle".
 func (h *ChatHandler) GetSessionStatus(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		MemberID string `json:"memberID"`
@@ -151,7 +159,11 @@ func (h *ChatHandler) GetSessionStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
 
-	chatWriteJSON(w, http.StatusOK, map[string]string{"status": "idle"})
+	status := "idle"
+	if h.wsHandler != nil {
+		status = h.wsHandler.GetSessionStatus(req.MemberID, req.ThreadID)
+	}
+	chatWriteJSON(w, http.StatusOK, map[string]string{"status": status})
 }
 
 // DeleteUserThreads deletes all threads and chat messages for a user.
