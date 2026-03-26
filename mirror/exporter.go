@@ -37,7 +37,7 @@ type ExportItemResult struct {
 // ExportItem 通用匯出：每個 item 都對應一個 name.json。
 func (e *Exporter) ExportItem(userId string, item *model.Item) (ExportItemResult, error) {
 	mirrorData := ItemToMirrorData(item)
-	parentDirPath := e.resolveParentDir(userId, item.GetParentID(), item.Type)
+	parentDirPath := e.ResolveParentDir(userId, item.GetParentID(), item.Type)
 	if err := e.fs.MkdirAll(parentDirPath); err != nil {
 		return ExportItemResult{}, fmt.Errorf("mkdir parent: %w", err)
 	}
@@ -66,7 +66,8 @@ func (e *Exporter) ExportItem(userId string, item *model.Item) (ExportItemResult
 	}, nil
 }
 
-func (e *Exporter) resolveParentDir(userID, parentID, itemType string) string {
+// ResolveParentDir returns the directory path where an item's .json should be written.
+func (e *Exporter) ResolveParentDir(userID, parentID, itemType string) string {
 	if parentID == "" {
 		return filepath.Join(userID, resolveTypeFromItemType(itemType))
 	}

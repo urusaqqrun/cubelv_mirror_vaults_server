@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sync/atomic"
 
 	"github.com/urusaqqrun/vault-mirror-service/mirror"
 	"github.com/urusaqqrun/vault-mirror-service/model"
+	"golang.org/x/sync/errgroup"
 )
 
 // FullExporter 全量匯出用戶 Vault 所需的讀取介面
@@ -33,21 +35,40 @@ func ExportFullVault(ctx context.Context, fs mirror.VaultFS, reader FullExporter
 	exporter := mirror.NewExporter(fs, resolver)
 	sorted := topoSortItems(allItems)
 
-	itemCount := 0
-	skippedCount := 0
+	// Phase 1: pre-create all parent directories (serial, fast)
 	for _, item := range sorted {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
 		if item == nil {
 			continue
 		}
-		if _, err := exporter.ExportItem(userID, item); err != nil {
-			log.Printf("[FullExport] %s %s error: %v", item.Type, item.ID, err)
-			skippedCount++
+		parentDir := exporter.ResolveParentDir(userID, item.GetParentID(), item.Type)
+		_ = fs.MkdirAll(parentDir)
+	}
+
+	// Phase 2: write all .json files in parallel (20 goroutines)
+	var itemCount int64
+	var skippedCount int64
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(20)
+	for _, item := range sorted {
+		if item == nil {
 			continue
 		}
-		itemCount++
+		item := item
+		g.Go(func() error {
+			if gctx.Err() != nil {
+				return gctx.Err()
+			}
+			if _, err := exporter.ExportItem(userID, item); err != nil {
+				log.Printf("[FullExport] %s %s error: %v", item.Type, item.ID, err)
+				atomic.AddInt64(&skippedCount, 1)
+				return nil // don't abort other items
+			}
+			atomic.AddInt64(&itemCount, 1)
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return err
 	}
 
 	if err := fs.WriteFile(userID+"/.vault_initialized", []byte("1")); err != nil {
@@ -55,7 +76,7 @@ func ExportFullVault(ctx context.Context, fs mirror.VaultFS, reader FullExporter
 	}
 
 	log.Printf("[FullExport] 用戶 %s 匯出完成: %d items (skipped: %d)",
-		userID, itemCount, skippedCount)
+		userID, atomic.LoadInt64(&itemCount), atomic.LoadInt64(&skippedCount))
 	return nil
 }
 
