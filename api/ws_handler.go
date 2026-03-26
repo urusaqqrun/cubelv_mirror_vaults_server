@@ -336,8 +336,24 @@ func (h *WsHandler) handleMessage(session *WsSession, sessionKey string, msg map
 				tokenUsage = b
 			}
 
-			// Record usage to Python billing API (fire-and-forget)
-			go h.recordBilling(session.memberID, session.mode, session.threadID, parsed)
+			// 即時扣款（同步，不是 fire-and-forget）
+			h.recordBilling(session.memberID, session.mode, session.threadID, parsed)
+
+			// 每個 turn 結束後檢查餘額，不足就 kill CLI 中斷任務
+			if err := h.checkCredits(session.memberID); err != nil {
+				log.Printf("[WS] credits exhausted mid-task for %s, killing CLI", session.memberID)
+				session.mu.Lock()
+				if session.cli != nil {
+					session.cli.Kill()
+				}
+				session.mu.Unlock()
+				session.Send(map[string]interface{}{
+					"type":     "stream_error",
+					"memberID": session.memberID,
+					"error":    err.Error(),
+				})
+				// eventCh will close because CLI was killed
+			}
 		}
 	}
 
