@@ -221,8 +221,8 @@ func (e *fullTaskExecutor) Execute(task *api.Task) error {
 		execCtx = context.Background()
 	}
 
-	// 確保 Vault 已初始化（CLAUDE.md 不存在時做全量匯出）
-	if e.fullExporter != nil && !e.vaultFS.Exists(task.UserID+"/CLAUDE.md") {
+	// 確保 Vault 已初始化（.vault_initialized 不存在時做全量匯出）
+	if e.fullExporter != nil && !e.vaultFS.Exists(task.UserID+"/.vault_initialized") {
 		if err := vaultsync.ExportFullVault(execCtx, e.vaultFS, e.fullExporter, task.UserID); err != nil {
 			log.Printf("[Task %s] full export error: %v", task.ID, err)
 		}
@@ -312,7 +312,7 @@ func (e *fullTaskExecutor) ExecuteStream(task *api.Task, eventCh chan<- executor
 	}
 
 	// Ensure Vault is initialised (best-effort, no lock needed for read check)
-	if e.fullExporter != nil && !e.vaultFS.Exists(task.UserID+"/CLAUDE.md") {
+	if e.fullExporter != nil && !e.vaultFS.Exists(task.UserID+"/.vault_initialized") {
 		// Lock briefly for full export only
 		if e.vaultLock.Lock(task.UserID, task.ID+"-init") {
 			if err := vaultsync.ExportFullVault(execCtx, e.vaultFS, e.fullExporter, task.UserID); err != nil {

@@ -30,6 +30,9 @@ echo "- Redis: $([ -n "$REDIS_URI" ] && echo "已配置" || echo "未配置")"
 echo "- 最大並發任務: ${MAX_CONCURRENT_TASKS:-3}"
 echo "- Claude CLI: $(command -v claude &>/dev/null && echo "已安裝" || echo "未安裝")"
 
+# 替換 CLAUDE.md 模板中的 {AI_SERVICE_URL} 為實際環境變數值
+sed -i "s|{AI_SERVICE_URL}|${AI_SERVICE_URL:-http://chatbot.svc.local:8000}|g" /home/mirror/.claude/CLAUDE.md
+
 # 啟動主程序
 echo "啟動 vault-mirror-service..."
 exec /app/vault-mirror-service

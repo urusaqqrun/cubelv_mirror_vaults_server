@@ -41,6 +41,7 @@ COPY ./entrypoint.sh /app/
 # Claude CLI hooks 設定
 RUN mkdir -p /home/mirror/.claude && \
     cp /app/config/claude-hooks-settings.json /home/mirror/.claude/settings.json && \
+    cp /app/config/CLAUDE.md.template /home/mirror/.claude/CLAUDE.md && \
     echo '# clean bashrc for hook compatibility' > /home/mirror/.bashrc && \
     chmod +x /app/config/hooks/*.sh && \
     chown -R mirror:mirror /home/mirror/.claude /home/mirror/.bashrc

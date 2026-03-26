@@ -50,34 +50,13 @@ func ExportFullVault(ctx context.Context, fs mirror.VaultFS, reader FullExporter
 		itemCount++
 	}
 
-	claudeMD := buildClaudeMD()
-	if err := fs.WriteFile(userID+"/CLAUDE.md", []byte(claudeMD)); err != nil {
-		log.Printf("[FullExport] write CLAUDE.md error: %v", err)
+	if err := fs.WriteFile(userID+"/.vault_initialized", []byte("1")); err != nil {
+		log.Printf("[FullExport] write .vault_initialized error: %v", err)
 	}
 
 	log.Printf("[FullExport] 用戶 %s 匯出完成: %d items (skipped: %d)",
 		userID, itemCount, skippedCount)
 	return nil
-}
-
-// buildClaudeMD 產生 CLAUDE.md 專案描述檔
-func buildClaudeMD() string {
-	return `# NoteCEO Vault
-
-你是 NoteCEO Vault 的 AI 助手，正在操作一個包含用戶資料的檔案系統。
-
-## 目錄結構
-
-頂層目錄名稱對應 itemType（如 NOTE、CARD 等），由系統動態產生。
-每個 item 都是 {name}.json，有子項就有同名目錄。
-
-## 規則
-
-1. 保留每個 .json 內的 id 與 parentID
-2. 搬移 item 時更新 parentID
-3. 改名 item 時同步調整 .json 與同名子目錄
-4. 目錄只代表子項容器，不是另一份 metadata
-`
 }
 
 func topoSortItems(items []*model.Item) []*model.Item {

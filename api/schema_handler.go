@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"path/filepath"
@@ -76,6 +77,9 @@ func (h *SchemaHandler) SyncSchemas(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[SchemaHandler] write _index.json error: %v", err)
 	}
 
+	// Update user-level CLAUDE.md with aiHints from schemas
+	updateUserClaudeMD(h.fs, memberID, req.Schemas)
+
 	log.Printf("[SchemaHandler] synced %d schemas for %s", len(req.Schemas), memberID)
 
 	w.Header().Set("Content-Type", "application/json")
@@ -83,6 +87,95 @@ func (h *SchemaHandler) SyncSchemas(w http.ResponseWriter, r *http.Request) {
 		"success": true,
 		"count":   len(req.Schemas),
 	})
+}
+
+// updateUserClaudeMD updates the user-level CLAUDE.md in the vault with aiHints
+// extracted from the pushed schemas. It replaces content between AIHINTS markers,
+// or creates the file with markers if it doesn't exist.
+func updateUserClaudeMD(vaultFS mirror.VaultFS, memberID string, schemas map[string]interface{}) {
+	// Build aiHints text from all schemas that have aiHints
+	var hintsBuilder strings.Builder
+	for typeName, schema := range schemas {
+		schemaMap, ok := schema.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		aiHints, ok := schemaMap["aiHints"]
+		if !ok {
+			continue
+		}
+		// aiHints can be a string or []interface{}
+		switch v := aiHints.(type) {
+		case string:
+			if v != "" {
+				hintsBuilder.WriteString(fmt.Sprintf("### %s\n%s\n\n", typeName, v))
+			}
+		case []interface{}:
+			if len(v) > 0 {
+				hintsBuilder.WriteString(fmt.Sprintf("### %s\n", typeName))
+				for _, hint := range v {
+					if s, ok := hint.(string); ok {
+						hintsBuilder.WriteString(fmt.Sprintf("- %s\n", s))
+					}
+				}
+				hintsBuilder.WriteString("\n")
+			}
+		}
+	}
+
+	hintsContent := hintsBuilder.String()
+
+	// Build the aiHints block with markers
+	aiHintsBlock := "<!-- AIHINTS:START -->\n"
+	if hintsContent != "" {
+		aiHintsBlock += "## 啟用的插件 aiHints\n\n" + hintsContent
+	}
+	aiHintsBlock += "<!-- AIHINTS:END -->"
+
+	claudeMDPath := filepath.Join(memberID, "CLAUDE.md")
+
+	// Try to read existing file
+	existing, err := vaultFS.ReadFile(claudeMDPath)
+	if err != nil {
+		// File doesn't exist — create new with markers
+		newContent := fmt.Sprintf("# 用戶個人化設定\n\n%s\n\n<!-- AI_MEMORY:START -->\n<!-- AI_MEMORY:END -->\n", aiHintsBlock)
+		if writeErr := vaultFS.WriteFile(claudeMDPath, []byte(newContent)); writeErr != nil {
+			log.Printf("[SchemaHandler] write user CLAUDE.md error: %v", writeErr)
+		}
+		return
+	}
+
+	content := string(existing)
+
+	// Replace content between AIHINTS markers
+	startMarker := "<!-- AIHINTS:START -->"
+	endMarker := "<!-- AIHINTS:END -->"
+	startIdx := strings.Index(content, startMarker)
+	endIdx := strings.Index(content, endMarker)
+
+	if startIdx >= 0 && endIdx >= 0 && endIdx > startIdx {
+		// Replace the block between markers (inclusive)
+		newContent := content[:startIdx] + aiHintsBlock + content[endIdx+len(endMarker):]
+		if writeErr := vaultFS.WriteFile(claudeMDPath, []byte(newContent)); writeErr != nil {
+			log.Printf("[SchemaHandler] update user CLAUDE.md error: %v", writeErr)
+		}
+	} else {
+		// Markers don't exist — append before AI_MEMORY or at end
+		memoryMarker := "<!-- AI_MEMORY:START -->"
+		memIdx := strings.Index(content, memoryMarker)
+		if memIdx >= 0 {
+			newContent := content[:memIdx] + aiHintsBlock + "\n\n" + content[memIdx:]
+			if writeErr := vaultFS.WriteFile(claudeMDPath, []byte(newContent)); writeErr != nil {
+				log.Printf("[SchemaHandler] update user CLAUDE.md error: %v", writeErr)
+			}
+		} else {
+			// No markers at all — append aiHints block and memory markers at end
+			newContent := content + "\n\n" + aiHintsBlock + "\n\n<!-- AI_MEMORY:START -->\n<!-- AI_MEMORY:END -->\n"
+			if writeErr := vaultFS.WriteFile(claudeMDPath, []byte(newContent)); writeErr != nil {
+				log.Printf("[SchemaHandler] update user CLAUDE.md error: %v", writeErr)
+			}
+		}
+	}
 }
 
 // extractMemberIDFromAuth 從 Authorization header 的 JWT payload 取 user_id

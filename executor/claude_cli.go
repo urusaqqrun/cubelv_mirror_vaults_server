@@ -56,15 +56,12 @@ func (e *ClaudeExecutor) ExecuteTask(ctx context.Context, taskID, workDir, instr
 	execCtx, cancel := context.WithTimeout(ctx, e.timeout)
 	defer cancel()
 
-	// 產生 CLAUDE.md 指導檔案
-	claudeMD := buildClaudeMD(instruction)
-
 	// 構建 Claude CLI 命令
 	args := []string{
 		"--print",
 		"--dangerously-skip-permissions",
 		"--output-format", "text",
-		"-p", claudeMD,
+		"-p", instruction,
 	}
 
 	cmd := exec.CommandContext(execCtx, "claude", args...)
@@ -156,14 +153,12 @@ func (e *ClaudeExecutor) ExecuteTaskStream(
 	execCtx, cancel := context.WithTimeout(ctx, e.timeout)
 	defer cancel()
 
-	claudeMD := buildClaudeMD(instruction)
-
 	args := []string{
 		"--print",
 		"--verbose",
 		"--dangerously-skip-permissions",
 		"--output-format", "stream-json",
-		"-p", claudeMD,
+		"-p", instruction,
 	}
 
 	cmd := exec.CommandContext(execCtx, "claude", args...)
@@ -420,53 +415,3 @@ func (p *PersistentCLI) resetIdleTimer() {
 	})
 }
 
-func buildClaudeMD(instruction string) string {
-	aiServiceURL := os.Getenv("AI_SERVICE_URL")
-	if aiServiceURL == "" {
-		aiServiceURL = "http://chatbot.svc.local:8000"
-	}
-
-	var sb strings.Builder
-	sb.WriteString("你是 NoteCEO Vault 的 AI 助手。\n")
-	sb.WriteString("你正在操作一個包含用戶資料的檔案系統。\n\n")
-	sb.WriteString("## 重要：先讀 .schemas/_index.json\n\n")
-	sb.WriteString("建立任何 item 之前，**必須**先讀 .schemas/_index.json 確認正確的 itemType 名稱和欄位。\n")
-	sb.WriteString("不要自己猜 itemType，只用 .schemas/ 裡列出的名稱（如 NOTE、NOTE_FOLDER、CARD、CARD_FOLDER、TODO、TODO_FOLDER 等）。\n\n")
-	sb.WriteString("目錄結構：\n")
-	sb.WriteString("頂層目錄名稱對應 itemType 的前綴（NOTE_FOLDER 和 NOTE 都在 NOTE/ 目錄下）。\n")
-	sb.WriteString("每個 item 都是 {name}.json，有子項就有同名目錄。\n\n")
-	sb.WriteString("## JSON 格式\n\n")
-	sb.WriteString("每個 .json 檔案格式如下（所有欄位放在頂層）：\n")
-	sb.WriteString("```json\n")
-	sb.WriteString("{\"id\":\"24字元hex\",\"name\":\"名稱\",\"itemType\":\"NOTE\",\"parentID\":\"父項ID或null\",\"version\":1,\"createdAt\":\"毫秒時間戳\",\"updatedAt\":\"毫秒時間戳\",\"content\":\"內容\",\"tags\":[]}\n")
-	sb.WriteString("```\n")
-	sb.WriteString("id 用 24 字元 hex（如 `a3f8c21d4e9b70500000001`）。createdAt/updatedAt 用 Unix 毫秒時間戳字串。\n\n")
-	sb.WriteString("規則：\n")
-	sb.WriteString("1. 不要刪除任何 .json 中的 id、parentID 欄位\n")
-	sb.WriteString("2. 搬移 item 時更新 parentID\n")
-	sb.WriteString("3. 改名 item 時同步調整 .json 與同名子目錄\n")
-	sb.WriteString("4. 使用 Bash 時只用明確的絕對路徑\n")
-	sb.WriteString("5. 建立資料夾型 item（如 CARD_FOLDER）時，parentID 設為 null\n")
-	sb.WriteString("6. 建立子 item（如 CARD）時，parentID 設為資料夾的 id\n\n")
-
-	// AI Service API（通用工具）
-	sb.WriteString("## AI Service API\n\n")
-	sb.WriteString("API base URL: " + aiServiceURL + "\n\n")
-	sb.WriteString("### 圖片搜尋\n")
-	sb.WriteString("搜尋圖片 URL（有 retry 機制，自動驗證 URL 可用性）：\n")
-	sb.WriteString("```bash\n")
-	sb.WriteString("curl -s -X POST " + aiServiceURL + "/cubelv/search_card_image \\\n")
-	sb.WriteString("  -H 'Content-Type: application/json' \\\n")
-	sb.WriteString("  -d '{\"query\":\"搜尋關鍵詞\"}'\n")
-	sb.WriteString("```\n")
-	sb.WriteString("回傳：`{\"imageUrl\":\"...\",\"title\":\"...\",\"source\":\"...\"}`\n\n")
-	sb.WriteString("## 網路搜尋\n\n")
-	sb.WriteString("需要搜尋網路資訊時，使用 MCP 工具 `web_search`（serper-search server），不要使用內建的 WebSearch。\n")
-	sb.WriteString("支援三種搜尋：search（網頁）、images（圖片）、news（新聞），預設語言 zh-tw。\n\n")
-	sb.WriteString("## 各 item type 的特殊規則\n\n")
-	sb.WriteString("讀 .schemas/_index.json，每個 type 可能有 aiHints 欄位，列出該 type 的特殊操作指示。\n")
-	sb.WriteString("aiHints 中的 {AI_SERVICE_URL} 請替換為：" + aiServiceURL + "\n\n")
-	sb.WriteString("用戶指令：\n")
-	sb.WriteString(instruction)
-	return sb.String()
-}
