@@ -112,6 +112,9 @@ func main() {
 	wsHandler.RegisterRoutes(mux)
 	chatHandler.SetWsHandler(wsHandler)
 
+	schemaHandler := api.NewSchemaHandler(vaultFS)
+	schemaHandler.RegisterRoutes(mux)
+
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		resp := map[string]interface{}{
 			"status": "ok",
