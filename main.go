@@ -296,13 +296,10 @@ func (e *fullTaskExecutor) Execute(task *api.Task) error {
 }
 
 // ExecuteStream runs the full vault pipeline with streaming Claude CLI output.
+// CLI execution is NOT locked — multiple conversations can run concurrently.
+// Only the writeback phase acquires the vault lock to prevent DB conflicts.
 func (e *fullTaskExecutor) ExecuteStream(task *api.Task, eventCh chan<- executor.StreamEvent) error {
 	workDir := fmt.Sprintf("%s/%s", e.vaultRoot, task.UserID)
-
-	if !e.vaultLock.Lock(task.UserID, task.ID) {
-		return fmt.Errorf("user vault is locked by another task")
-	}
-	defer e.vaultLock.Unlock(task.UserID, task.ID)
 
 	e.vaultFS.MkdirAll(task.UserID)
 
@@ -311,10 +308,14 @@ func (e *fullTaskExecutor) ExecuteStream(task *api.Task, eventCh chan<- executor
 		execCtx = context.Background()
 	}
 
-	// Ensure Vault is initialised
+	// Ensure Vault is initialised (best-effort, no lock needed for read check)
 	if e.fullExporter != nil && !e.vaultFS.Exists(task.UserID+"/CLAUDE.md") {
-		if err := vaultsync.ExportFullVault(execCtx, e.vaultFS, e.fullExporter, task.UserID); err != nil {
-			log.Printf("[Task %s] full export error: %v", task.ID, err)
+		// Lock briefly for full export only
+		if e.vaultLock.Lock(task.UserID, task.ID+"-init") {
+			if err := vaultsync.ExportFullVault(execCtx, e.vaultFS, e.fullExporter, task.UserID); err != nil {
+				log.Printf("[Task %s] full export error: %v", task.ID, err)
+			}
+			e.vaultLock.Unlock(task.UserID, task.ID+"-init")
 		}
 	}
 
@@ -330,7 +331,7 @@ func (e *fullTaskExecutor) ExecuteStream(task *api.Task, eventCh chan<- executor
 		return fmt.Errorf("snapshot before error: %w", snapErr)
 	}
 
-	// Claude CLI streaming
+	// Claude CLI streaming — NO LOCK, multiple conversations can run concurrently
 	err := e.claudeExec.ExecuteTaskStream(
 		execCtx, task.ID, workDir, task.Instruction, task.Scope, task.UserID, eventCh,
 	)
@@ -338,7 +339,7 @@ func (e *fullTaskExecutor) ExecuteStream(task *api.Task, eventCh chan<- executor
 		return err
 	}
 
-	// diff + writeback
+	// diff + writeback — LOCK only for the writeback phase
 	afterSnap, snapErr := executor.TakeSnapshot(e.vaultFS, task.UserID)
 	if snapErr != nil {
 		return fmt.Errorf("snapshot after error: %w", snapErr)
@@ -357,6 +358,13 @@ func (e *fullTaskExecutor) ExecuteStream(task *api.Task, eventCh chan<- executor
 	entries, parseErr := importer.ProcessDiff(task.UserID, diff.Created, diff.Modified, diff.Deleted, movedEntries, beforeIDMap)
 	if parseErr != nil {
 		return fmt.Errorf("parse diff error: %w", parseErr)
+	}
+
+	// Acquire lock only for DB writeback
+	if !e.vaultLock.Lock(task.UserID, task.ID+"-wb") {
+		log.Printf("[Task %s] writeback lock contention, proceeding anyway", task.ID)
+	} else {
+		defer e.vaultLock.Unlock(task.UserID, task.ID+"-wb")
 	}
 
 	if e.writer != nil && len(entries) > 0 {
