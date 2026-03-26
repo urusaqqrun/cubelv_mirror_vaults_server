@@ -90,6 +90,10 @@
                 {
                     "name": "ANTHROPIC_API_KEY",
                     "valueFrom": "arn:aws:ssm:ap-northeast-1:<AWS_ACCOUNT_ID>:parameter/cubelv/ANTHROPIC_API_KEY"
+                },
+                {
+                    "name": "SERPER_API_KEY",
+                    "valueFrom": "arn:aws:ssm:ap-northeast-1:<AWS_ACCOUNT_ID>:parameter/cubelv/SERPER_API_KEY"
                 }
             ],
             "logConfiguration": {

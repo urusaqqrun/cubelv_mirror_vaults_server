@@ -1,4 +1,11 @@
 {
+  "mcpServers": {
+    "serper-search": {
+      "command": "python3",
+      "args": ["/app/config/mcp_serper_server.py"],
+      "timeout": 30
+    }
+  },
   "hooks": {
     "PreToolUse": [
       {
