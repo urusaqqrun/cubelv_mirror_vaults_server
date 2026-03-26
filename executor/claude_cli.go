@@ -251,17 +251,24 @@ type PersistentCLI struct {
 	idleTimer *time.Timer
 	idleTTL   time.Duration
 	workDir   string
+	sessionID string // CLI session UUID, used for --resume on restart
 	alive     bool
 }
 
 // NewPersistentCLI starts a persistent Claude CLI process.
 // The process reads stream-json from stdin and writes stream-json to stdout.
-func NewPersistentCLI(workDir, scope, userID string, idleTTL time.Duration) (*PersistentCLI, error) {
+// If resumeSessionID is non-empty, the CLI resumes the previous conversation.
+func NewPersistentCLI(workDir, scope, userID, resumeSessionID string, idleTTL time.Duration) (*PersistentCLI, error) {
 	args := []string{
 		"--input-format", "stream-json",
 		"--output-format", "stream-json",
 		"--verbose",
 		"--dangerously-skip-permissions",
+	}
+
+	if resumeSessionID != "" {
+		args = append(args, "--resume", resumeSessionID)
+		log.Printf("[PersistentCLI] resuming session %s", resumeSessionID)
 	}
 
 	cmd := exec.Command("claude", args...)
@@ -288,16 +295,17 @@ func NewPersistentCLI(workDir, scope, userID string, idleTTL time.Duration) (*Pe
 	scanner.Buffer(make([]byte, 256*1024), 256*1024)
 
 	p := &PersistentCLI{
-		cmd:     cmd,
-		stdin:   stdinPipe,
-		stdout:  scanner,
-		idleTTL: idleTTL,
-		workDir: workDir,
-		alive:   true,
+		cmd:       cmd,
+		stdin:     stdinPipe,
+		stdout:    scanner,
+		idleTTL:   idleTTL,
+		workDir:   workDir,
+		sessionID: resumeSessionID,
+		alive:     true,
 	}
 	p.resetIdleTimer()
 
-	log.Printf("[PersistentCLI] started pid=%d workDir=%s", cmd.Process.Pid, workDir)
+	log.Printf("[PersistentCLI] started pid=%d workDir=%s resume=%s", cmd.Process.Pid, workDir, resumeSessionID)
 	return p, nil
 }
 
@@ -345,7 +353,21 @@ func (p *PersistentCLI) SendMessage(message string) (<-chan StreamEvent, error) 
 			var parsed map[string]interface{}
 			if json.Unmarshal([]byte(line), &parsed) == nil {
 				if parsed["type"] == "result" {
+					// Capture session_id from result event for --resume on restart
+					if sid, ok := parsed["session_id"].(string); ok && sid != "" {
+						p.mu.Lock()
+						p.sessionID = sid
+						p.mu.Unlock()
+					}
 					return
+				}
+				// Also try to capture from system init event
+				if parsed["type"] == "system" {
+					if sid, ok := parsed["session_id"].(string); ok && sid != "" {
+						p.mu.Lock()
+						p.sessionID = sid
+						p.mu.Unlock()
+					}
 				}
 			}
 		}
@@ -378,6 +400,14 @@ func (p *PersistentCLI) IsAlive() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.alive
+}
+
+// SessionID returns the CLI session UUID (captured from result events).
+// Used for --resume when restarting after idle kill.
+func (p *PersistentCLI) SessionID() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.sessionID
 }
 
 func (p *PersistentCLI) resetIdleTimer() {

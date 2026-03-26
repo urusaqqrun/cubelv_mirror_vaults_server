@@ -24,14 +24,15 @@ var upgrader = websocket.Upgrader{
 
 // WsSession represents a single WebSocket connection session.
 type WsSession struct {
-	conn     *websocket.Conn
-	memberID string
-	threadID string
-	mode     string
-	taskID   string
-	status   string // idle, asking, interrupted
-	mu       sync.Mutex
-	cli      *executor.PersistentCLI // persistent CLI process for this session
+	conn           *websocket.Conn
+	memberID       string
+	threadID       string
+	mode           string
+	taskID         string
+	status         string // idle, asking, interrupted
+	cliSessionID   string // CLI session UUID for --resume after idle kill
+	mu             sync.Mutex
+	cli            *executor.PersistentCLI // persistent CLI process for this session
 }
 
 // Send writes a JSON message to the WebSocket connection (thread-safe).
@@ -112,10 +113,10 @@ func (h *WsHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		conn.Close()
 	}()
 
-	// Pre-warm: start persistent CLI in background
+	// Pre-warm: start persistent CLI in background (no resume on first connect)
 	go func() {
 		workDir := filepath.Join(h.vaultRoot, memberID)
-		cli, err := executor.NewPersistentCLI(workDir, "chat", memberID, 5*time.Minute)
+		cli, err := executor.NewPersistentCLI(workDir, "chat", memberID, "", 5*time.Minute)
 		if err != nil {
 			log.Printf("[WS] CLI pre-start failed for %s: %v", memberID, err)
 			return
@@ -393,6 +394,7 @@ func (h *WsHandler) handleMessage(session *WsSession, sessionKey string, msg map
 }
 
 // ensureCLI returns a live PersistentCLI for the session, starting one if needed.
+// If a previous CLI had a session ID, it uses --resume to restore conversation context.
 func (h *WsHandler) ensureCLI(session *WsSession) *executor.PersistentCLI {
 	session.mu.Lock()
 	cli := session.cli
@@ -402,19 +404,26 @@ func (h *WsHandler) ensureCLI(session *WsSession) *executor.PersistentCLI {
 		return cli
 	}
 
-	// CLI not started or died — start synchronously
+	// Capture session ID from old CLI before starting new one
+	session.mu.Lock()
+	if session.cli != nil {
+		if sid := session.cli.SessionID(); sid != "" {
+			session.cliSessionID = sid
+		}
+		session.cli.Kill()
+	}
+	resumeID := session.cliSessionID
+	session.mu.Unlock()
+
+	// CLI not started or died — start synchronously (with resume if available)
 	workDir := filepath.Join(h.vaultRoot, session.memberID)
-	newCLI, err := executor.NewPersistentCLI(workDir, "chat", session.memberID, 5*time.Minute)
+	newCLI, err := executor.NewPersistentCLI(workDir, "chat", session.memberID, resumeID, 5*time.Minute)
 	if err != nil {
 		log.Printf("[WS] CLI start failed for %s: %v", session.memberID, err)
 		return nil
 	}
 
 	session.mu.Lock()
-	// Kill old CLI if it existed
-	if session.cli != nil {
-		session.cli.Kill()
-	}
 	session.cli = newCLI
 	session.mu.Unlock()
 
