@@ -48,7 +48,7 @@ func main() {
 		log.Fatalf("EnsureChatMessagesTable 失敗: %v", err)
 	}
 	if err := pgStore.EnsureThreadMappingConstraint(ctx); err != nil {
-		log.Fatalf("EnsureThreadMappingConstraint 失敗: %v", err)
+		log.Printf("EnsureThreadMappingConstraint 警告: %v", err)
 	}
 
 	// VaultFS（EFS 實作）

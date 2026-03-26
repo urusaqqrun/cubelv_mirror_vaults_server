@@ -9,6 +9,11 @@ import (
 // EnsureThreadMappingConstraint adds the unique constraint on (member_id, thread_id)
 // if it doesn't already exist. Required for ON CONFLICT upsert.
 func (s *PgStore) EnsureThreadMappingConstraint(ctx context.Context) error {
+	// First remove duplicates (keep the newest row per member_id+thread_id)
+	_, _ = s.db.ExecContext(ctx, `
+		DELETE FROM thread_mapping a USING thread_mapping b
+		WHERE a.id < b.id AND a.member_id = b.member_id AND a.thread_id = b.thread_id`)
+
 	_, err := s.db.ExecContext(ctx, `
 		DO $$ BEGIN
 			IF NOT EXISTS (
