@@ -3,7 +3,29 @@ package database
 import (
 	"context"
 	"fmt"
+	"log"
 )
+
+// EnsureThreadMappingConstraint adds the unique constraint on (member_id, thread_id)
+// if it doesn't already exist. Required for ON CONFLICT upsert.
+func (s *PgStore) EnsureThreadMappingConstraint(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `
+		DO $$ BEGIN
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_constraint
+				WHERE conname = 'uq_thread_mapping_member_thread'
+			) THEN
+				ALTER TABLE thread_mapping
+				ADD CONSTRAINT uq_thread_mapping_member_thread
+				UNIQUE (member_id, thread_id);
+			END IF;
+		END $$`)
+	if err != nil {
+		return fmt.Errorf("ensure thread_mapping constraint: %w", err)
+	}
+	log.Println("vault-mirror-service: thread_mapping constraint ensured")
+	return nil
+}
 
 // ThreadInfo represents a thread in the thread_mapping table.
 type ThreadInfo struct {

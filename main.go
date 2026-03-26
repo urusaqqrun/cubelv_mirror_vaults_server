@@ -47,6 +47,9 @@ func main() {
 	if err := pgStore.EnsureChatMessagesTable(ctx); err != nil {
 		log.Fatalf("EnsureChatMessagesTable 失敗: %v", err)
 	}
+	if err := pgStore.EnsureThreadMappingConstraint(ctx); err != nil {
+		log.Fatalf("EnsureThreadMappingConstraint 失敗: %v", err)
+	}
 
 	// VaultFS（EFS 實作）
 	vaultFS := &mirror.RealVaultFS{Root: cfg.VaultRoot}
