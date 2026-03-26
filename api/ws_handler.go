@@ -3,8 +3,11 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
+	"os/exec"
+	"strings"
 	"sync"
 	"time"
 
@@ -335,7 +338,55 @@ func (h *WsHandler) handleInterrupt(session *WsSession) {
 }
 
 func (h *WsHandler) maybeGenerateTitle(session *WsSession, userMsg, assistantMsg string) {
-	// TODO: Check if thread already has a title; if not, generate one via Anthropic API
+	// Only generate title for the first message in a thread
+	msgs, _, err := h.chatStore.GetMessagesAfter(context.Background(), session.threadID, session.mode, "", 5)
+	if err != nil || len(msgs) > 2 {
+		return
+	}
+
+	truncated := assistantMsg
+	if len(truncated) > 200 {
+		truncated = truncated[:200]
+	}
+	prompt := fmt.Sprintf(`Generate a concise title for this conversation (max 15 characters for CJK, 5 words for English).
+Return ONLY the title text, no prefix, no quotes.
+Reflect the user's question. Avoid generic words like "conversation" or "discussion".
+
+User: %s
+Assistant: %s`, userMsg, truncated)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "claude", "--print", "-p", prompt)
+	out, err := cmd.Output()
+	if err != nil {
+		log.Printf("[WS] title generation failed: %v", err)
+		return
+	}
+
+	title := strings.TrimSpace(string(out))
+	for _, prefix := range []string{"標題：", "標題:", "Title:", "Title：", "主題：", "主題:"} {
+		title = strings.TrimPrefix(title, prefix)
+	}
+	title = strings.Trim(title, "\"'`")
+	title = strings.TrimSpace(title)
+	if len([]rune(title)) > 20 {
+		title = string([]rune(title)[:17]) + "..."
+	}
+	if title == "" {
+		return
+	}
+
+	log.Printf("[WS] generated title: %s", title)
+	h.chatStore.AddThreadMapping(context.Background(), session.memberID, session.threadID, title, session.mode)
+
+	session.Send(map[string]interface{}{
+		"type":      "thread_title_update",
+		"memberID":  session.memberID,
+		"thread_id": session.threadID,
+		"title":     title,
+	})
 }
 
 // GetSessionStatus returns the session status for a given member/thread pair.
