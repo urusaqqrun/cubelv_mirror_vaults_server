@@ -1,12 +1,13 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
-	"os/exec"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -359,14 +360,49 @@ Assistant: %s`, userMsg, truncated)
 	defer cancel()
 
 	log.Printf("[WS] generating title for thread %s...", session.threadID)
-	cmd := exec.CommandContext(ctx, "claude", "--print", "--dangerously-skip-permissions", "--model", "claude-haiku-4-5-20251001", "-p", prompt)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		log.Printf("[WS] title generation failed: %v, output: %s", err, string(out)[:min(len(out), 200)])
+
+	// Use Anthropic HTTP API directly (much faster than spawning claude CLI)
+	apiKey := os.Getenv("ANTHROPIC_API_KEY")
+	if apiKey == "" {
+		log.Printf("[WS] title generation skipped: no ANTHROPIC_API_KEY")
 		return
 	}
 
-	title := strings.TrimSpace(string(out))
+	reqBody, _ := json.Marshal(map[string]interface{}{
+		"model":      "claude-haiku-4-5-20251001",
+		"max_tokens": 50,
+		"messages": []map[string]string{
+			{"role": "user", "content": prompt},
+		},
+	})
+
+	req, err := http.NewRequestWithContext(ctx, "POST", "https://api.anthropic.com/v1/messages", bytes.NewReader(reqBody))
+	if err != nil {
+		log.Printf("[WS] title request error: %v", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", apiKey)
+	req.Header.Set("anthropic-version", "2023-06-01")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Printf("[WS] title API error: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Content []struct {
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil || len(result.Content) == 0 {
+		log.Printf("[WS] title parse error: %v", err)
+		return
+	}
+
+	title := strings.TrimSpace(result.Content[0].Text)
 	for _, prefix := range []string{"標題：", "標題:", "Title:", "Title：", "主題：", "主題:"} {
 		title = strings.TrimPrefix(title, prefix)
 	}
