@@ -397,26 +397,8 @@ func selectTaskStore(fallback api.TaskStore, rdb *redis.Client, taskTimeoutMinut
 // noopDataReader 用於降級模式。
 type noopDataReader struct{}
 
-func (n *noopDataReader) ListFolders(ctx context.Context, userID string) ([]*model.Folder, error) {
-	return []*model.Folder{}, nil
-}
-func (n *noopDataReader) GetFolder(ctx context.Context, userID, folderID string) (*model.Folder, error) {
-	return nil, nil
-}
-func (n *noopDataReader) GetNote(ctx context.Context, userID, noteID string) (*model.Note, error) {
-	return nil, nil
-}
-func (n *noopDataReader) GetCard(ctx context.Context, userID, cardID string) (*model.Card, error) {
-	return nil, nil
-}
-func (n *noopDataReader) GetChart(ctx context.Context, userID, chartID string) (*model.Chart, error) {
-	return nil, nil
-}
 func (n *noopDataReader) GetItem(ctx context.Context, userID, itemID string) (*model.Item, error) {
 	return nil, nil
-}
-func (n *noopDataReader) ListItemFolders(ctx context.Context, userID string) ([]*model.Item, error) {
-	return []*model.Item{}, nil
 }
 func (n *noopDataReader) ListAllItems(ctx context.Context, userID string) ([]*model.Item, error) {
 	return []*model.Item{}, nil

@@ -61,18 +61,10 @@ type Sharer struct {
 	Role   string `json:"role" bson:"role"`
 }
 
-// FolderType 常數
-const (
-	FolderTypeNote  = "NOTE"
-	FolderTypeTodo  = "TODO"
-	FolderTypeCard  = "CARD"
-	FolderTypeChart = "CHART"
-)
-
-// GetType 回傳 Folder type，nil 視為 NOTE
+// GetType 回傳 Folder type，nil 時回傳空字串
 func (f *Folder) GetType() string {
 	if f.Type == nil {
-		return FolderTypeNote
+		return ""
 	}
 	return *f.Type
 }

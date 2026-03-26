@@ -13,19 +13,6 @@ type Item struct {
 	Fields map[string]interface{} `json:"fields" bson:"fields"`
 }
 
-// Item type 常數
-const (
-	ItemTypeFolder     = "FOLDER"
-	ItemTypeNoteFolder = "NOTE_FOLDER"
-	ItemTypeCardFolder = "CARD_FOLDER"
-	ItemTypeChartFolder = "CHART_FOLDER"
-	ItemTypeTodoFolder = "TODO_FOLDER"
-	ItemTypeNote       = "NOTE"
-	ItemTypeTodo       = "TODO"
-	ItemTypeCard       = "CARD"
-	ItemTypeChart      = "CHART"
-)
-
 // IsFolder 判斷 itemType 是否為資料夾類型（相容舊的 "FOLDER" + 通用 _FOLDER 後綴）
 func IsFolder(itemType string) bool {
 	return itemType == "FOLDER" || strings.HasSuffix(itemType, "_FOLDER")

@@ -69,22 +69,6 @@ func (s *PgStore) GetItem(ctx context.Context, userID, itemID string) (*model.It
 	return s.scanItem(row)
 }
 
-func (s *PgStore) ListItemFolders(ctx context.Context, userID string) ([]*model.Item, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT bi.id, bi.item_type, bi.name, bi.fields, bi.version, bi.created_at, bi.updated_at
-		 FROM base_items bi
-		 JOIN item_permissions ip ON ip.item_id = bi.id AND ip.permission = 'owner'
-		 WHERE ip.user_id = $1 AND bi.deleted_at IS NULL
-		 AND (bi.item_type = 'FOLDER' OR bi.item_type LIKE '%\_FOLDER' ESCAPE '\')`,
-		userID,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return s.scanItems(rows)
-}
-
 func (s *PgStore) ListAllItems(ctx context.Context, userID string) ([]*model.Item, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT bi.id, bi.item_type, bi.name, bi.fields, bi.version, bi.created_at, bi.updated_at
@@ -100,56 +84,6 @@ func (s *PgStore) ListAllItems(ctx context.Context, userID string) ([]*model.Ite
 	return s.scanItems(rows)
 }
 
-// 以下為 DataReader 舊介面的相容實作，golang_service 只發 collection=item 事件，
-// 這些方法是 fallback，直接從 base_items 轉換
-
-func (s *PgStore) ListFolders(ctx context.Context, userID string) ([]*model.Folder, error) {
-	items, err := s.ListItemFolders(ctx, userID)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]*model.Folder, 0, len(items))
-	for _, item := range items {
-		out = append(out, itemToFolder(item))
-	}
-	return out, nil
-}
-
-func (s *PgStore) GetFolder(ctx context.Context, userID, folderID string) (*model.Folder, error) {
-	item, err := s.GetItem(ctx, userID, folderID)
-	if err != nil || item == nil {
-		return nil, err
-	}
-	if !model.IsFolder(item.Type) {
-		return nil, nil
-	}
-	return itemToFolder(item), nil
-}
-
-func (s *PgStore) GetNote(ctx context.Context, userID, noteID string) (*model.Note, error) {
-	item, err := s.GetItem(ctx, userID, noteID)
-	if err != nil || item == nil {
-		return nil, err
-	}
-	return itemToNote(item), nil
-}
-
-func (s *PgStore) GetCard(ctx context.Context, userID, cardID string) (*model.Card, error) {
-	item, err := s.GetItem(ctx, userID, cardID)
-	if err != nil || item == nil {
-		return nil, err
-	}
-	return itemToCard(item), nil
-}
-
-func (s *PgStore) GetChart(ctx context.Context, userID, chartID string) (*model.Chart, error) {
-	item, err := s.GetItem(ctx, userID, chartID)
-	if err != nil || item == nil {
-		return nil, err
-	}
-	return itemToChart(item), nil
-}
-
 // ---------------------------------------------------------------------------
 // DataWriter 介面（executor/writeback.go 使用）
 // 所有 Upsert 統一寫入 base_items + sync_changes
@@ -162,7 +96,7 @@ func (s *PgStore) UpsertItem(ctx context.Context, userID string, doc executor.Do
 	}
 	itemType, _ := doc["itemType"].(string)
 	if itemType == "" {
-		itemType = "NOTE"
+		return fmt.Errorf("missing itemType in doc (id=%s)", id)
 	}
 
 	fieldsRaw, _ := doc["fields"]
@@ -252,46 +186,6 @@ func (s *PgStore) UpsertItem(ctx context.Context, userID string, doc executor.Do
 	}
 
 	return tx.Commit()
-}
-
-// UpsertFolder/Note/Card/Chart 統一轉換為 Item 格式後呼叫 UpsertItem
-func (s *PgStore) UpsertFolder(ctx context.Context, userID string, doc executor.Doc) error {
-	return s.upsertLegacyAsItem(ctx, userID, doc, "FOLDER")
-}
-
-func (s *PgStore) UpsertNote(ctx context.Context, userID string, doc executor.Doc) error {
-	return s.upsertLegacyAsItem(ctx, userID, doc, "NOTE")
-}
-
-func (s *PgStore) UpsertCard(ctx context.Context, userID string, doc executor.Doc) error {
-	return s.upsertLegacyAsItem(ctx, userID, doc, "CARD")
-}
-
-func (s *PgStore) UpsertChart(ctx context.Context, userID string, doc executor.Doc) error {
-	return s.upsertLegacyAsItem(ctx, userID, doc, "CHART")
-}
-
-// upsertLegacyAsItem 將舊格式 doc 轉為 Item 格式
-func (s *PgStore) upsertLegacyAsItem(ctx context.Context, userID string, doc executor.Doc, defaultType string) error {
-	id, _ := doc["_id"].(string)
-	if id == "" {
-		return fmt.Errorf("missing _id in legacy doc")
-	}
-
-	fields := make(map[string]interface{})
-	for k, v := range doc {
-		if k == "_id" {
-			continue
-		}
-		fields[k] = v
-	}
-
-	itemDoc := executor.Doc{
-		"_id":      id,
-		"itemType": defaultType,
-		"fields":   fields,
-	}
-	return s.UpsertItem(ctx, userID, itemDoc)
 }
 
 func (s *PgStore) DeleteItemDoc(ctx context.Context, userID, docID string, version int) error {
@@ -562,114 +456,6 @@ func (s *PgStore) scanItems(rows *sql.Rows) ([]*model.Item, error) {
 		})
 	}
 	return out, rows.Err()
-}
-
-// ---------------------------------------------------------------------------
-// Item → 舊 model 轉換（相容 DataReader 舊介面）
-// ---------------------------------------------------------------------------
-
-func itemToFolder(item *model.Item) *model.Folder {
-	f := &model.Folder{
-		ID:  item.ID,
-		Usn: item.GetUSN(),
-	}
-
-	if n := item.GetName(); n != "" {
-		f.FolderName = n
-	}
-	if v := model.StrPtrField(item.Fields, "folderType"); v != nil {
-		f.Type = v
-	} else {
-		sub := model.FolderSubType(item.Type)
-		if sub != "" {
-			f.Type = &sub
-		}
-	}
-	f.ParentID = model.StrPtrField(item.Fields, "parentID")
-	f.OrderAt = model.StrPtrField(item.Fields, "orderAt")
-	f.Icon = model.StrPtrField(item.Fields, "icon")
-	f.CreatedAt = model.Int64StrField(item.Fields, "createdAt")
-	f.UpdatedAt = model.Int64StrField(item.Fields, "updatedAt")
-	f.FolderSummary = model.StrPtrField(item.Fields, "folderSummary")
-	f.AiFolderName = model.StrPtrField(item.Fields, "aiFolderName")
-	f.AiFolderSummary = model.StrPtrField(item.Fields, "aiFolderSummary")
-	f.AiInstruction = model.StrPtrField(item.Fields, "aiInstruction")
-	f.AutoUpdateSummary = model.BoolField(item.Fields, "autoUpdateSummary")
-	f.IsTemp = model.BoolField(item.Fields, "isTemp")
-	f.NoteNum = model.Int64Field(item.Fields, "noteNum")
-	f.TemplateHTML = model.StrPtrField(item.Fields, "templateHtml")
-	f.TemplateCSS = model.StrPtrField(item.Fields, "templateCss")
-	f.UIPrompt = model.StrPtrField(item.Fields, "uiPrompt")
-	f.IsShared = model.BoolField(item.Fields, "isShared")
-	f.Searchable = model.BoolField(item.Fields, "searchable")
-	f.AllowContribute = model.BoolField(item.Fields, "allowContribute")
-	f.ChartKind = model.StrPtrField(item.Fields, "chartKind")
-	return f
-}
-
-func itemToNote(item *model.Item) *model.Note {
-	n := &model.Note{
-		ID:      item.ID,
-		Title:   model.StrPtrField(item.Fields, "title"),
-		Content: model.StrPtrField(item.Fields, "content"),
-		Tags:    model.StringSliceField(item.Fields, "tags"),
-		ParentID: model.StrPtrDeref(model.StrPtrField(item.Fields, "parentID")),
-		Usn:      item.GetUSN(),
-		CreateAt: model.Int64Field(item.Fields, "createdAt"),
-		UpdateAt: model.Int64Field(item.Fields, "updatedAt"),
-		OrderAt:  model.StrPtrField(item.Fields, "orderAt"),
-		Status:   model.StrPtrField(item.Fields, "status"),
-		AiTitle:  model.StrPtrField(item.Fields, "aiTitle"),
-		AiTags:   model.StringSliceField(item.Fields, "aiTags"),
-		ImgURLs:  model.StringSliceField(item.Fields, "imgURLs"),
-		IsNew:    model.BoolField(item.Fields, "isNew"),
-	}
-	if t := model.StrPtrField(item.Fields, "_type"); t != nil {
-		n.Type = *t
-	} else if item.Type == "TODO" {
-		n.Type = "TODO"
-	}
-	return n
-}
-
-func itemToCard(item *model.Item) *model.Card {
-	return &model.Card{
-		ID: item.ID,
-		ParentID: func() string {
-			v := model.StrPtrField(item.Fields, "parentID")
-			if v != nil {
-				return *v
-			}
-			return ""
-		}(),
-		Name:      item.GetName(),
-		Fields:    model.StrPtrField(item.Fields, "fields"),
-		Reviews:   model.StrPtrField(item.Fields, "reviews"),
-		OrderAt:   model.StrPtrField(item.Fields, "orderAt"),
-		IsDeleted: model.BoolField(item.Fields, "isDeleted"),
-		CreatedAt: model.Int64StrField(item.Fields, "createdAt"),
-		UpdatedAt: model.Int64StrField(item.Fields, "updatedAt"),
-		Usn:       item.GetUSN(),
-	}
-}
-
-func itemToChart(item *model.Item) *model.Chart {
-	return &model.Chart{
-		ID: item.ID,
-		ParentID: func() string {
-			v := model.StrPtrField(item.Fields, "parentID")
-			if v != nil {
-				return *v
-			}
-			return ""
-		}(),
-		Name:      item.GetName(),
-		Data:      model.StrPtrField(item.Fields, "data"),
-		IsDeleted: model.BoolField(item.Fields, "isDeleted"),
-		CreatedAt: model.Int64StrField(item.Fields, "createdAt"),
-		UpdatedAt: model.Int64StrField(item.Fields, "updatedAt"),
-		Usn:       item.GetUSN(),
-	}
 }
 
 // ---------------------------------------------------------------------------

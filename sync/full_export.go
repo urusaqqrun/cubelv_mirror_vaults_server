@@ -64,16 +64,12 @@ func ExportFullVault(ctx context.Context, fs mirror.VaultFS, reader FullExporter
 func buildClaudeMD() string {
 	return `# NoteCEO Vault
 
-你是 NoteCEO Vault 的 AI 助手，正在操作一個包含用戶筆記、卡片、圖表的檔案系統。
+你是 NoteCEO Vault 的 AI 助手，正在操作一個包含用戶資料的檔案系統。
 
 ## 目錄結構
 
-- NOTE/  — 筆記資料
-- TODO/  — 待辦資料
-- CARD/  — 卡片資料
-- CHART/ — 圖表資料
-
-每個 item 都是一個 .json 檔案；如果它有子項，會同層並列一個同名目錄。
+頂層目錄名稱對應 itemType（如 NOTE、CARD 等），由系統動態產生。
+每個 item 都是 {name}.json，有子項就有同名目錄。
 
 ## 規則
 

@@ -243,16 +243,14 @@ func buildClaudeMD(instruction string) string {
 
 	var sb strings.Builder
 	sb.WriteString("你是 NoteCEO Vault 的 AI 助手。\n")
-	sb.WriteString("你正在操作一個包含用戶筆記、卡片、圖表的檔案系統。\n\n")
+	sb.WriteString("你正在操作一個包含用戶資料的檔案系統。\n\n")
 	sb.WriteString("目錄結構：\n")
-	sb.WriteString("- NOTE/  — 筆記（.md 檔案，含 frontmatter）\n")
-	sb.WriteString("- TODO/  — 待辦（.md 檔案，含 frontmatter）\n")
-	sb.WriteString("- CARD/  — 卡片（.json 檔案）\n")
-	sb.WriteString("- CHART/ — 圖表（.json 檔案）\n\n")
+	sb.WriteString("頂層目錄名稱對應 itemType（如 NOTE、CARD 等），由系統動態產生。\n")
+	sb.WriteString("每個 item 都是 {name}.json，有子項就有同名目錄。\n\n")
 	sb.WriteString("規則：\n")
-	sb.WriteString("1. 不要刪除任何 _folder.json 中的 ID、ownerID 欄位\n")
-	sb.WriteString("2. 修改 .md 檔案時保留 frontmatter 的 id 和 parentID\n")
-	sb.WriteString("3. 搬移檔案時更新 frontmatter 中的 parentID\n")
+	sb.WriteString("1. 不要刪除任何 .json 中的 id、parentID 欄位\n")
+	sb.WriteString("2. 搬移 item 時更新 parentID\n")
+	sb.WriteString("3. 改名 item 時同步調整 .json 與同名子目錄\n")
 	sb.WriteString("4. 使用 Bash 時只用明確的絕對路徑，不要使用 cd、../ 或 shell 變數組合路徑\n\n")
 
 	// Card template API instructions
@@ -267,7 +265,7 @@ func buildClaudeMD(instruction string) string {
 	sb.WriteString("  -d '{\"name\":\"卡片類型名稱\",\"fields\":[{\"name\":\"欄位名\",\"type\":\"TEXT\"},...],\"uiPrompt\":\"用戶的設計指示\"}'\n")
 	sb.WriteString("```\n")
 	sb.WriteString("回傳：`{\"templateHtml\":\"...\",\"templateCss\":\"...\"}`\n")
-	sb.WriteString("將回傳的 templateHtml 和 templateCss 寫入 _folder.json。\n\n")
+	sb.WriteString("將回傳的 templateHtml 和 templateCss 寫入該資料夾的 .json。\n\n")
 
 	sb.WriteString("可用欄位類型：TEXT, TEXTAREA, NUMBER, DATE, DATETIME, DATERANGE, URL, EMAIL, PHONE, IMAGE, SELECT, MULTISELECT, TAGS, BOOLEAN, RATING, LOCATION\n")
 	sb.WriteString("SELECT/MULTISELECT 需要附 options 陣列。\n\n")
