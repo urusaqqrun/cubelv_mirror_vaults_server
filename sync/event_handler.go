@@ -194,6 +194,7 @@ func (h *SyncEventHandler) deleteItemByDocID(ctx context.Context, userID, docID 
 	return nil
 }
 
+// exportByDocID 處理舊 collection 事件，將舊 model 轉換為通用 Item 後匯出
 func (h *SyncEventHandler) exportByDocID(ctx context.Context, userID, collection, docID string) error {
 	resolver, err := h.getResolver(ctx, userID)
 	if err != nil {
@@ -201,62 +202,44 @@ func (h *SyncEventHandler) exportByDocID(ctx context.Context, userID, collection
 	}
 	exporter := mirror.NewExporter(h.fs, resolver)
 
+	var item *model.Item
+
 	switch strings.ToLower(collection) {
 	case "folder":
 		f, err := h.reader.GetFolder(ctx, userID, docID)
 		if err != nil || f == nil {
 			return err
 		}
-		meta := toFolderMeta(f)
-		if err := exporter.ExportFolder(userID, meta); err != nil {
-			return err
-		}
-		if err := h.rebuildDocPathIndex(ctx, userID); err != nil {
-			return err
-		}
-		return nil
+		item = folderToItem(f)
 	case "note":
 		n, err := h.reader.GetNote(ctx, userID, docID)
 		if err != nil || n == nil {
 			return err
 		}
-		meta := toNoteMeta(n)
-		if err := exporter.ExportNote(userID, meta, n.GetContent()); err != nil {
-			return err
-		}
-		if err := h.rebuildDocPathIndex(ctx, userID); err != nil {
-			return err
-		}
-		return nil
+		item = noteToItem(n)
 	case "card":
 		c, err := h.reader.GetCard(ctx, userID, docID)
 		if err != nil || c == nil {
 			return err
 		}
-		meta := toCardMeta(c)
-		if err := exporter.ExportCard(userID, meta); err != nil {
-			return err
-		}
-		if err := h.rebuildDocPathIndex(ctx, userID); err != nil {
-			return err
-		}
-		return nil
+		item = cardToItem(c)
 	case "chart":
 		c, err := h.reader.GetChart(ctx, userID, docID)
 		if err != nil || c == nil {
 			return err
 		}
-		meta := toChartMeta(c)
-		if err := exporter.ExportChart(userID, meta); err != nil {
-			return err
-		}
-		if err := h.rebuildDocPathIndex(ctx, userID); err != nil {
-			return err
-		}
-		return nil
+		item = chartToItem(c)
 	default:
 		return nil
 	}
+
+	if _, err := exporter.ExportItem(userID, item); err != nil {
+		return err
+	}
+	if err := h.rebuildDocPathIndex(ctx, userID); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (h *SyncEventHandler) deleteByDocID(ctx context.Context, userID, collection, docID string) error {
@@ -422,126 +405,178 @@ func buildPathResolverFromItems(items []*model.Item) *mirror.PathResolver {
 			ID:       item.ID,
 			Name:     item.GetName(),
 			ItemType: item.Type,
-			ParentID:   model.StrPtrField(item.Fields, "parentID"),
+			ParentID: model.StrPtrField(item.Fields, "parentID"),
 		})
 	}
 	return mirror.NewPathResolver(nodes)
 }
 
-func toFolderMeta(f *model.Folder) mirror.FolderMeta {
-	meta := mirror.FolderMeta{
-		ID:                  f.ID,
-		FolderName:          f.FolderName,
-		Type:                f.Type,
-		ParentID:            f.ParentID,
-		OrderAt:             f.OrderAt,
-		Icon:                f.Icon,
-		CreatedAt:           f.CreatedAt,
-		UpdatedAt:           f.UpdatedAt,
-		USN:                 f.Usn,
-		NoteNum:             f.NoteNum,
-		IsTemp:              f.IsTemp,
-		FolderSummary:       f.FolderSummary,
-		AiFolderName:        f.AiFolderName,
-		AiFolderSummary:     f.AiFolderSummary,
-		AiInstruction:       f.AiInstruction,
-		AutoUpdateSummary:   f.AutoUpdateSummary,
-		IsSummarizedNoteIds: f.IsSummarizedNoteIds,
-		TemplateHTML:        f.TemplateHTML,
-		TemplateCSS:         f.TemplateCSS,
-		UIPrompt:            f.UIPrompt,
-		IsShared:            f.IsShared,
-		Searchable:          f.Searchable,
-		AllowContribute:     f.AllowContribute,
-		ChartKind:           f.ChartKind,
+// folderToItem 將舊 Folder model 轉換為通用 Item
+func folderToItem(f *model.Folder) *model.Item {
+	folderType := "NOTE"
+	if f.Type != nil && *f.Type != "" {
+		folderType = *f.Type
 	}
-	for _, idx := range f.Indexes {
-		if idx == nil {
-			continue
-		}
-		meta.Indexes = append(meta.Indexes, mirror.IndexMeta{
-			Name: idx.Name, Notes: idx.Notes, IsReserved: idx.IsReserved,
-		})
+	itemType := folderType + "_FOLDER"
+
+	fields := map[string]interface{}{
+		"name":    f.FolderName,
+		"noteNum": f.NoteNum,
+		"isTemp":  f.IsTemp,
+		"usn":     f.Usn,
 	}
-	for _, fd := range f.Fields {
-		if fd == nil {
-			continue
-		}
-		meta.Fields = append(meta.Fields, mirror.CardFieldMeta{
-			Name: fd.Name, Type: fd.Type, Options: fd.Options,
-		})
+	if f.ParentID != nil {
+		fields["parentID"] = *f.ParentID
 	}
-	for _, th := range f.TemplateHistory {
-		if th == nil {
-			continue
-		}
-		meta.TemplateHistory = append(meta.TemplateHistory, mirror.TemplateHistoryMeta{
-			HTML: th.HTML, CSS: th.CSS, Timestamp: th.Timestamp,
-		})
+	if f.OrderAt != nil {
+		fields["orderAt"] = *f.OrderAt
 	}
-	for _, s := range f.Sharers {
-		if s == nil {
-			continue
-		}
-		meta.Sharers = append(meta.Sharers, mirror.SharerMeta{
-			UserID: s.UserID, Role: s.Role,
-		})
+	if f.Icon != nil {
+		fields["icon"] = *f.Icon
 	}
-	return meta
+	if f.CreatedAt != "" {
+		fields["createdAt"] = f.CreatedAt
+	}
+	if f.UpdatedAt != "" {
+		fields["updatedAt"] = f.UpdatedAt
+	}
+	if f.FolderSummary != nil {
+		fields["folderSummary"] = *f.FolderSummary
+	}
+	if f.AiFolderName != nil {
+		fields["aiFolderName"] = *f.AiFolderName
+	}
+	if f.AiFolderSummary != nil {
+		fields["aiFolderSummary"] = *f.AiFolderSummary
+	}
+	if f.AiInstruction != nil {
+		fields["aiInstruction"] = *f.AiInstruction
+	}
+	fields["autoUpdateSummary"] = f.AutoUpdateSummary
+	if f.TemplateHTML != nil {
+		fields["templateHtml"] = *f.TemplateHTML
+	}
+	if f.TemplateCSS != nil {
+		fields["templateCss"] = *f.TemplateCSS
+	}
+	if f.UIPrompt != nil {
+		fields["uiPrompt"] = *f.UIPrompt
+	}
+	fields["isShared"] = f.IsShared
+	fields["searchable"] = f.Searchable
+	fields["allowContribute"] = f.AllowContribute
+	if f.ChartKind != nil {
+		fields["chartKind"] = *f.ChartKind
+	}
+
+	return &model.Item{
+		ID:     f.ID,
+		Name:   f.FolderName,
+		Type:   itemType,
+		Fields: fields,
+	}
 }
 
-func toNoteMeta(n *model.Note) mirror.NoteMeta {
-	meta := mirror.NoteMeta{
-		ID:        n.ID,
-		ParentID:  n.ParentID,
-		Title:     n.GetTitle(),
-		Type:      n.Type,
-		USN:       n.Usn,
-		Tags:      n.Tags,
-		CreatedAt: fmt.Sprintf("%d", n.CreateAt),
-		UpdatedAt: fmt.Sprintf("%d", n.UpdateAt),
-		IsNew:     n.IsNew,
-		AiTags:    n.AiTags,
-		ImgURLs:   n.ImgURLs,
+// noteToItem 將舊 Note model 轉換為通用 Item
+func noteToItem(n *model.Note) *model.Item {
+	itemType := "NOTE"
+	if n.Type == "TODO" {
+		itemType = "TODO"
+	}
+	fields := map[string]interface{}{
+		"title":     n.GetTitle(),
+		"name":      n.GetTitle(),
+		"parentID":  n.ParentID,
+		"tags":      n.Tags,
+		"createdAt": fmt.Sprintf("%d", n.CreateAt),
+		"updatedAt": fmt.Sprintf("%d", n.UpdateAt),
+		"isNew":     n.IsNew,
+		"usn":       n.Usn,
+	}
+	if n.Content != nil {
+		fields["content"] = *n.Content
 	}
 	if n.OrderAt != nil {
-		meta.OrderAt = *n.OrderAt
+		fields["orderAt"] = *n.OrderAt
 	}
 	if n.Status != nil {
-		meta.Status = *n.Status
+		fields["status"] = *n.Status
 	}
 	if n.AiTitle != nil {
-		meta.AiTitle = *n.AiTitle
+		fields["aiTitle"] = *n.AiTitle
 	}
-	return meta
-}
-
-func toCardMeta(c *model.Card) mirror.CardMeta {
-	return mirror.CardMeta{
-		ID:            c.ID,
-		ContributorID: c.ContributorID,
-		ParentID:      c.ParentID,
-		Name:          c.Name,
-		Fields:        c.Fields,
-		Reviews:       c.Reviews,
-		Coordinates:   c.Coordinates,
-		OrderAt:       c.OrderAt,
-		IsDeleted:     c.IsDeleted,
-		CreatedAt:     c.CreatedAt,
-		UpdatedAt:     c.UpdatedAt,
-		USN:           c.Usn,
+	if n.AiTags != nil {
+		fields["aiTags"] = n.AiTags
+	}
+	if n.ImgURLs != nil {
+		fields["imgURLs"] = n.ImgURLs
+	}
+	return &model.Item{
+		ID:     n.ID,
+		Name:   n.GetTitle(),
+		Type:   itemType,
+		Fields: fields,
 	}
 }
 
-func toChartMeta(c *model.Chart) mirror.CardMeta {
-	return mirror.CardMeta{
-		ID:       c.ID,
-		ParentID: c.ParentID,
-		Name:      c.Name,
-		Fields:    c.Data,
-		IsDeleted: c.IsDeleted,
-		CreatedAt: c.CreatedAt,
-		UpdatedAt: c.UpdatedAt,
-		USN:       c.Usn,
+// cardToItem 將舊 Card model 轉換為通用 Item
+func cardToItem(c *model.Card) *model.Item {
+	fields := map[string]interface{}{
+		"parentID":  c.ParentID,
+		"name":      c.Name,
+		"usn":       c.Usn,
+		"isDeleted": c.IsDeleted,
+	}
+	if c.Fields != nil {
+		fields["fields"] = *c.Fields
+	}
+	if c.Reviews != nil {
+		fields["reviews"] = *c.Reviews
+	}
+	if c.ContributorID != nil {
+		fields["contributorId"] = *c.ContributorID
+	}
+	if c.Coordinates != nil {
+		fields["coordinates"] = *c.Coordinates
+	}
+	if c.OrderAt != nil {
+		fields["orderAt"] = *c.OrderAt
+	}
+	if c.CreatedAt != "" {
+		fields["createdAt"] = c.CreatedAt
+	}
+	if c.UpdatedAt != "" {
+		fields["updatedAt"] = c.UpdatedAt
+	}
+	return &model.Item{
+		ID:     c.ID,
+		Name:   c.Name,
+		Type:   "CARD",
+		Fields: fields,
+	}
+}
+
+// chartToItem 將舊 Chart model 轉換為通用 Item
+func chartToItem(c *model.Chart) *model.Item {
+	fields := map[string]interface{}{
+		"parentID":  c.ParentID,
+		"name":      c.Name,
+		"usn":       c.Usn,
+		"isDeleted": c.IsDeleted,
+	}
+	if c.Data != nil {
+		fields["data"] = *c.Data
+	}
+	if c.CreatedAt != "" {
+		fields["createdAt"] = c.CreatedAt
+	}
+	if c.UpdatedAt != "" {
+		fields["updatedAt"] = c.UpdatedAt
+	}
+	return &model.Item{
+		ID:     c.ID,
+		Name:   c.Name,
+		Type:   "CHART",
+		Fields: fields,
 	}
 }

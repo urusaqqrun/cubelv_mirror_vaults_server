@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
-	"log"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -27,30 +26,6 @@ type Exporter struct {
 
 func NewExporter(fs VaultFS, resolver *PathResolver) *Exporter {
 	return &Exporter{fs: fs, resolver: resolver}
-}
-
-// ExportFolder 舊介面轉為統一 Item JSON 匯出。
-func (e *Exporter) ExportFolder(userId string, meta FolderMeta) error {
-	_, err := e.ExportItem(userId, folderMetaToItem(meta))
-	return err
-}
-
-// ExportNote 舊介面轉為統一 Item JSON 匯出。
-func (e *Exporter) ExportNote(userId string, meta NoteMeta, html string) error {
-	_, err := e.ExportItem(userId, noteMetaToItem(meta, html))
-	return err
-}
-
-// ExportCard 舊介面轉為統一 Item JSON 匯出。
-func (e *Exporter) ExportCard(userId string, meta CardMeta) error {
-	_, err := e.ExportItem(userId, cardMetaToItem(meta, "CARD"))
-	return err
-}
-
-// ExportChart 舊介面轉為統一 Item JSON 匯出。
-func (e *Exporter) ExportChart(userId string, meta CardMeta) error {
-	_, err := e.ExportItem(userId, cardMetaToItem(meta, "CHART"))
-	return err
 }
 
 // ExportItemResult ExportItem 的回傳結果
@@ -206,62 +181,19 @@ func (e *Exporter) DeleteItem(userId, itemID string) error {
 	return nil
 }
 
-// DeleteFolder 舊介面轉為通用刪除。
-func (e *Exporter) DeleteFolder(userId string, folderID string) error {
-	return e.DeleteItem(userId, folderID)
-}
-
-// DeleteNote 舊介面轉為通用刪除。
-func (e *Exporter) DeleteNote(userId string, noteID string, title string, parentFolderID string) error {
-	return e.DeleteItem(userId, noteID)
-}
-
-// ExportBatchEntry 批次匯出項目
-type ExportBatchEntry struct {
-	ItemType   string
-	FolderMeta *FolderMeta
-	NoteMeta   *NoteMeta
-	NoteHTML   string
-	CardMeta   *CardMeta
-	Item       *model.Item // 新格式：通用 Item 匯出
-}
-
 // ExportBatch 使用 errgroup 並行寫入多個檔案到 EFS（上限 8 goroutines）
-func (e *Exporter) ExportBatch(userId string, entries []ExportBatchEntry) error {
+// 所有 item 統一走 ExportItem。
+func (e *Exporter) ExportBatch(userId string, items []*model.Item) error {
 	g := new(errgroup.Group)
 	g.SetLimit(8)
-	for _, entry := range entries {
-		entry := entry
+	for _, item := range items {
+		item := item
 		g.Go(func() error {
-			if entry.Item != nil {
-				_, err := e.ExportItem(userId, entry.Item)
-				return err
-			}
-			switch {
-			case model.IsFolder(entry.ItemType):
-				if entry.FolderMeta == nil {
-					return nil
-				}
-				return e.ExportFolder(userId, *entry.FolderMeta)
-			case entry.ItemType == "NOTE" || entry.ItemType == "TODO":
-				if entry.NoteMeta == nil {
-					return nil
-				}
-				return e.ExportNote(userId, *entry.NoteMeta, entry.NoteHTML)
-			case entry.ItemType == "CARD":
-				if entry.CardMeta == nil {
-					return nil
-				}
-				return e.ExportCard(userId, *entry.CardMeta)
-			case entry.ItemType == "CHART":
-				if entry.CardMeta == nil {
-					return nil
-				}
-				return e.ExportChart(userId, *entry.CardMeta)
-			default:
-				log.Printf("[ExportBatch] unknown itemType: %s", entry.ItemType)
+			if item == nil {
 				return nil
 			}
+			_, err := e.ExportItem(userId, item)
+			return err
 		})
 	}
 	return g.Wait()
@@ -342,125 +274,4 @@ func (e *Exporter) removeIndexedPath(userID, docID string) {
 		return
 	}
 	delete(e.docPathIndex, docID)
-}
-
-func folderMetaToItem(meta FolderMeta) *model.Item {
-	fields := map[string]interface{}{
-		"folderName": meta.FolderName,
-		"noteNum":    meta.NoteNum,
-		"isTemp":     meta.IsTemp,
-	}
-	itemType := "NOTE_FOLDER"
-	if meta.Type != nil && *meta.Type != "" {
-		itemType = resolveTypeFromItemType(*meta.Type) + "_FOLDER"
-		fields["folderType"] = *meta.Type
-	}
-	if meta.ParentID != nil {
-		fields["parentID"] = *meta.ParentID
-	}
-	if meta.OrderAt != nil {
-		fields["orderAt"] = *meta.OrderAt
-	}
-	if meta.Icon != nil {
-		fields["icon"] = *meta.Icon
-	}
-	if meta.CreatedAt != "" {
-		fields["createdAt"] = meta.CreatedAt
-	}
-	if meta.UpdatedAt != "" {
-		fields["updatedAt"] = meta.UpdatedAt
-	}
-	fields["usn"] = meta.USN
-	return &model.Item{
-		ID:     meta.ID,
-		Name:   meta.FolderName,
-		Type:   itemType,
-		Fields: fields,
-	}
-}
-
-func noteMetaToItem(meta NoteMeta, html string) *model.Item {
-	itemType := meta.Type
-	if itemType == "" {
-		itemType = "NOTE"
-	}
-	fields := map[string]interface{}{
-		"title":     meta.Title,
-		"name":      meta.Title,
-		"parentID":  meta.ParentID,
-		"tags":      meta.Tags,
-		"createdAt": meta.CreatedAt,
-		"updatedAt": meta.UpdatedAt,
-		"isNew":     meta.IsNew,
-		"usn":       meta.USN,
-	}
-	if html != "" {
-		fields["content"] = html
-	}
-	if meta.OrderAt != "" {
-		fields["orderAt"] = meta.OrderAt
-	}
-	if meta.Status != "" {
-		fields["status"] = meta.Status
-	}
-	if meta.AiTitle != "" {
-		fields["aiTitle"] = meta.AiTitle
-	}
-	if meta.AiTags != nil {
-		fields["aiTags"] = meta.AiTags
-	}
-	if meta.ImgURLs != nil {
-		fields["imgURLs"] = meta.ImgURLs
-	}
-	return &model.Item{
-		ID:     meta.ID,
-		Name:   meta.Title,
-		Type:   itemType,
-		Fields: fields,
-	}
-}
-
-func cardMetaToItem(meta CardMeta, itemType string) *model.Item {
-	if itemType == "" {
-		itemType = "CARD"
-	}
-	fields := map[string]interface{}{
-		"parentID": meta.ParentID,
-		"name":     meta.Name,
-		"usn":      meta.USN,
-	}
-	if meta.OrderAt != nil {
-		fields["orderAt"] = *meta.OrderAt
-	}
-	if meta.CreatedAt != "" {
-		fields["createdAt"] = meta.CreatedAt
-	}
-	if meta.UpdatedAt != "" {
-		fields["updatedAt"] = meta.UpdatedAt
-	}
-	if itemType == "CHART" {
-		if meta.Fields != nil {
-			fields["data"] = *meta.Fields
-		}
-	} else {
-		if meta.Fields != nil {
-			fields["fields"] = *meta.Fields
-		}
-		if meta.Reviews != nil {
-			fields["reviews"] = *meta.Reviews
-		}
-		if meta.ContributorID != nil {
-			fields["contributorId"] = *meta.ContributorID
-		}
-		if meta.Coordinates != nil {
-			fields["coordinates"] = *meta.Coordinates
-		}
-		fields["isDeleted"] = meta.IsDeleted
-	}
-	return &model.Item{
-		ID:     meta.ID,
-		Name:   meta.Name,
-		Type:   itemType,
-		Fields: fields,
-	}
 }

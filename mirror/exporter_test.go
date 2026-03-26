@@ -17,15 +17,17 @@ func newTestExporter() (*Exporter, *MemoryVaultFS) {
 	return NewExporter(fs, resolver), fs
 }
 
-func TestExportFolder_WritesSiblingJSON(t *testing.T) {
+func TestExportItem_FolderWritesSiblingJSON(t *testing.T) {
 	exp, fs := newTestExporter()
-	noteType := "NOTE"
-	err := exp.ExportFolder("user1", FolderMeta{
-		ID:         "f1",
-		FolderName: "工作",
-		Type:       &noteType,
-		OrderAt:    strPtr("1709000000"),
-	})
+	item := &model.Item{
+		ID:   "f1",
+		Name: "工作",
+		Type: "NOTE_FOLDER",
+		Fields: map[string]interface{}{
+			"usn": 1,
+		},
+	}
+	_, err := exp.ExportItem("user1", item)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,17 +56,23 @@ func TestExportItem_UsesParentIDPath(t *testing.T) {
 	if !fs.Exists("user1/NOTE/工作/筆記A/A評論.json") {
 		t.Fatal("child note should be placed under parent note container")
 	}
-	if fs.Exists("user1/NOTE/工作/筆記A/A評論.md") {
-		t.Fatal("legacy markdown path should not exist")
-	}
 }
 
-func TestExportNote_WritesJSONFile(t *testing.T) {
+func TestExportItem_NoteWritesJSONFile(t *testing.T) {
 	exp, fs := newTestExporter()
-	err := exp.ExportNote("user1", NoteMeta{
-		ID: "n2", ParentID: "f1", Title: "今日會議", USN: 3,
-		CreatedAt: "1700000000000", UpdatedAt: "1709000000000",
-	}, "<p>會議內容</p>")
+	item := &model.Item{
+		ID:   "n2",
+		Name: "今日會議",
+		Type: "NOTE",
+		Fields: map[string]interface{}{
+			"parentID":  "f1",
+			"content":   "<p>會議內容</p>",
+			"usn":       3,
+			"createdAt": "1700000000000",
+			"updatedAt": "1709000000000",
+		},
+	}
+	_, err := exp.ExportItem("user1", item)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,12 +120,18 @@ func TestExportItem_RenameMovesChildContainer(t *testing.T) {
 	}
 }
 
-func TestExportCard_WritesJSONFile(t *testing.T) {
+func TestExportItem_CardWritesJSONFile(t *testing.T) {
 	exp, fs := newTestExporter()
-	err := exp.ExportCard("user1", CardMeta{
-		ID: "card1", ParentID: "c1", Name: "鼎泰豐",
-		Fields: strPtr(`{"店名":"鼎泰豐"}`),
-	})
+	item := &model.Item{
+		ID:   "card1",
+		Name: "鼎泰豐",
+		Type: "CARD",
+		Fields: map[string]interface{}{
+			"parentID": "c1",
+			"fields":   `{"店名":"鼎泰豐"}`,
+		},
+	}
+	_, err := exp.ExportItem("user1", item)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -343,5 +357,19 @@ func TestExportItem_RenameCleanupOldPath(t *testing.T) {
 	}
 	if !fs.Exists("user1/NOTE/工作/新名.json") {
 		t.Error("new file should exist after rename")
+	}
+}
+
+func TestExportBatch_AllItems(t *testing.T) {
+	exp, fs := newItemTestExporter()
+	items := []*model.Item{
+		{ID: "b1", Name: "note1", Type: "NOTE", Fields: map[string]interface{}{"parentID": "f1"}},
+		{ID: "b2", Name: "note2", Type: "NOTE", Fields: map[string]interface{}{"parentID": "f1"}},
+	}
+	if err := exp.ExportBatch("user1", items); err != nil {
+		t.Fatal(err)
+	}
+	if !fs.Exists("user1/NOTE/工作/note1.json") || !fs.Exists("user1/NOTE/工作/note2.json") {
+		t.Fatal("batch export should create all items")
 	}
 }

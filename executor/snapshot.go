@@ -56,17 +56,8 @@ func TakeSnapshotAndPathIDMap(vaultFS mirror.VaultFS, userID string) (map[string
 			ModTime: info.ModTime(),
 		}
 
-		if strings.HasSuffix(path, ".md") {
-			meta, _, pErr := mirror.MarkdownToNote(string(data))
-			if pErr == nil && meta.ID != "" {
-				idMap[relPath] = meta.ID
-			}
-		} else if strings.HasSuffix(path, "_folder.json") {
-			meta, jErr := mirror.JSONToFolder(data)
-			if jErr == nil && meta.ID != "" {
-				idMap[relPath] = meta.ID
-			}
-		} else if strings.HasSuffix(path, ".json") {
+		// 統一從 JSON 讀取 ID
+		if strings.HasSuffix(path, ".json") {
 			var doc map[string]any
 			if jErr := json.Unmarshal(data, &doc); jErr == nil {
 				if id, ok := doc["id"].(string); ok && id != "" {

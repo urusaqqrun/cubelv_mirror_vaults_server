@@ -6,83 +6,6 @@ import (
 	"github.com/urusaqqrun/vault-mirror-service/mirror"
 )
 
-func TestFolderMetaToItemDoc_PreservesFolderItemType(t *testing.T) {
-	noteType := "NOTE"
-	doc := folderMetaToItemDoc(&mirror.FolderMeta{
-		ID:         "f1",
-		FolderName: "資料夾",
-		Type:       &noteType,
-	}, "NOTE_FOLDER", 10)
-
-	if got, _ := doc["itemType"].(string); got != "NOTE_FOLDER" {
-		t.Fatalf("itemType mismatch: got %q, want %q", got, "NOTE_FOLDER")
-	}
-}
-
-func TestFolderMetaToItemDoc_InvalidTypeFallsBack(t *testing.T) {
-	doc := folderMetaToItemDoc(&mirror.FolderMeta{
-		ID:         "f1",
-		FolderName: "資料夾",
-	}, "UNKNOWN", 0)
-
-	if got, _ := doc["itemType"].(string); got != "FOLDER" {
-		t.Fatalf("itemType fallback mismatch: got %q, want %q", got, "FOLDER")
-	}
-}
-
-func TestChartAndCardLegacyDoc_IncludeIsDeleted(t *testing.T) {
-	deleted := true
-	cardDoc := cardMetaToDoc(&mirror.CardMeta{
-		ID:        "c1",
-		ParentID:  "p1",
-		Name:      "card",
-		USN:       1,
-		IsDeleted: deleted,
-	})
-	chartDoc := chartMetaToDoc(&mirror.CardMeta{
-		ID:        "h1",
-		ParentID:  "p1",
-		Name:      "chart",
-		USN:       1,
-		IsDeleted: deleted,
-	})
-
-	if got, _ := cardDoc["isDeleted"].(bool); !got {
-		t.Fatal("card doc should include isDeleted=true")
-	}
-	if got, _ := chartDoc["isDeleted"].(bool); !got {
-		t.Fatal("chart doc should include isDeleted=true")
-	}
-}
-
-func TestEnsureDocID_CreateWithEmptyID(t *testing.T) {
-	doc := Doc{"_id": "", "itemType": "NOTE"}
-	ensureDocID(doc, mirror.ImportActionCreate)
-	id, ok := doc["_id"].(string)
-	if !ok || id == "" {
-		t.Fatal("ensureDocID should generate a non-empty _id for create action")
-	}
-	if len(id) != 24 {
-		t.Fatalf("generated _id should be 24-char hex, got %q (len=%d)", id, len(id))
-	}
-}
-
-func TestEnsureDocID_CreateWithExistingID(t *testing.T) {
-	doc := Doc{"_id": "existing-id", "itemType": "NOTE"}
-	ensureDocID(doc, mirror.ImportActionCreate)
-	if doc["_id"] != "existing-id" {
-		t.Fatalf("ensureDocID should not overwrite existing _id, got %q", doc["_id"])
-	}
-}
-
-func TestEnsureDocID_UpdateWithEmptyID(t *testing.T) {
-	doc := Doc{"_id": "", "itemType": "NOTE"}
-	ensureDocID(doc, mirror.ImportActionUpdate)
-	if doc["_id"] != "" {
-		t.Fatal("ensureDocID should not generate _id for non-create actions")
-	}
-}
-
 func TestItemDataToItemDoc_BasicMapping(t *testing.T) {
 	data := &mirror.ItemMirrorData{
 		ID:       "item1",
@@ -144,5 +67,33 @@ func TestItemDataToItemDoc_DoesNotMutateOriginal(t *testing.T) {
 
 	if _, ok := originalFields["injected"]; ok {
 		t.Fatal("itemDataToItemDoc should not share Fields map with original")
+	}
+}
+
+func TestEnsureDocID_CreateWithEmptyID(t *testing.T) {
+	doc := Doc{"_id": "", "itemType": "NOTE"}
+	ensureDocID(doc, mirror.ImportActionCreate)
+	id, ok := doc["_id"].(string)
+	if !ok || id == "" {
+		t.Fatal("ensureDocID should generate a non-empty _id for create action")
+	}
+	if len(id) != 24 {
+		t.Fatalf("generated _id should be 24-char hex, got %q (len=%d)", id, len(id))
+	}
+}
+
+func TestEnsureDocID_CreateWithExistingID(t *testing.T) {
+	doc := Doc{"_id": "existing-id", "itemType": "NOTE"}
+	ensureDocID(doc, mirror.ImportActionCreate)
+	if doc["_id"] != "existing-id" {
+		t.Fatalf("ensureDocID should not overwrite existing _id, got %q", doc["_id"])
+	}
+}
+
+func TestEnsureDocID_UpdateWithEmptyID(t *testing.T) {
+	doc := Doc{"_id": "", "itemType": "NOTE"}
+	ensureDocID(doc, mirror.ImportActionUpdate)
+	if doc["_id"] != "" {
+		t.Fatal("ensureDocID should not generate _id for non-create actions")
 	}
 }

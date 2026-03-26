@@ -14,45 +14,8 @@ import (
 type mockWriter struct {
 	mu sync.Mutex
 
-	upsertFolderDocs []Doc
-	upsertNoteDocs   []Doc
-	upsertCardDocs   []Doc
-	upsertChartDocs  []Doc
-	upsertItemDocs   []Doc
-
-	deleteItemIDs []string
-	deleteDocs    []struct {
-		collection string
-		docID      string
-	}
-}
-
-func (m *mockWriter) UpsertFolder(_ context.Context, _ string, doc Doc) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.upsertFolderDocs = append(m.upsertFolderDocs, cloneDoc(doc))
-	return nil
-}
-
-func (m *mockWriter) UpsertNote(_ context.Context, _ string, doc Doc) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.upsertNoteDocs = append(m.upsertNoteDocs, cloneDoc(doc))
-	return nil
-}
-
-func (m *mockWriter) UpsertCard(_ context.Context, _ string, doc Doc) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.upsertCardDocs = append(m.upsertCardDocs, cloneDoc(doc))
-	return nil
-}
-
-func (m *mockWriter) UpsertChart(_ context.Context, _ string, doc Doc) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.upsertChartDocs = append(m.upsertChartDocs, cloneDoc(doc))
-	return nil
+	upsertItemDocs []Doc
+	deleteItemIDs  []string
 }
 
 func (m *mockWriter) UpsertItem(_ context.Context, _ string, doc Doc) error {
@@ -66,16 +29,6 @@ func (m *mockWriter) DeleteItemDoc(_ context.Context, _ string, docID string, _ 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.deleteItemIDs = append(m.deleteItemIDs, docID)
-	return nil
-}
-
-func (m *mockWriter) DeleteDocument(_ context.Context, _ string, collection, docID string, _ int) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.deleteDocs = append(m.deleteDocs, struct {
-		collection string
-		docID      string
-	}{collection: collection, docID: docID})
 	return nil
 }
 

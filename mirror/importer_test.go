@@ -12,23 +12,10 @@ func setupImporterFS() (*Importer, *MemoryVaultFS) {
 func TestProcessDiff_CreatedNote(t *testing.T) {
 	imp, fs := setupImporterFS()
 
-	mdContent := `---
-id: n1
-parentID: f1
-title: 新筆記
-usn: 1
-htmlHash: abc123
-createdAt: "1700000000000"
-updatedAt: "1709000000000"
----
+	noteJSON := `{"id":"n1","name":"新筆記","itemType":"NOTE","fields":{"parentID":"f1","content":"# 新筆記\n\n這是新建的筆記內容","tags":["工作"]}}`
+	fs.WriteFile("user1/NOTE/工作/新筆記.json", []byte(noteJSON))
 
-# 新筆記
-
-這是新建的筆記內容
-`
-	fs.WriteFile("user1/NOTE/工作/新筆記.md", []byte(mdContent))
-
-	entries, err := imp.ProcessDiff("user1", []string{"NOTE/工作/新筆記.md"}, nil, nil, nil, nil)
+	entries, err := imp.ProcessDiff("user1", []string{"NOTE/工作/新筆記.json"}, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,34 +31,21 @@ updatedAt: "1709000000000"
 	if entries[0].ItemType != "NOTE" {
 		t.Errorf("itemType: got %q, want %q", entries[0].ItemType, "NOTE")
 	}
-	if entries[0].NoteMeta == nil {
-		t.Fatal("NoteMeta should not be nil")
+	if entries[0].ItemData == nil {
+		t.Fatal("ItemData should not be nil")
 	}
-	if entries[0].NoteMeta.ID != "n1" {
-		t.Errorf("note ID: got %q, want %q", entries[0].NoteMeta.ID, "n1")
+	if entries[0].ItemData.ID != "n1" {
+		t.Errorf("note ID: got %q, want %q", entries[0].ItemData.ID, "n1")
 	}
 }
 
 func TestProcessDiff_ModifiedNote(t *testing.T) {
 	imp, fs := setupImporterFS()
 
-	mdContent := `---
-id: n1
-parentID: f1
-title: 修改的筆記
-usn: 2
-htmlHash: newHash
-createdAt: "1700000000000"
-updatedAt: "1709000000000"
----
+	noteJSON := `{"id":"n1","name":"修改的筆記","itemType":"NOTE","fields":{"parentID":"f1","content":"更新後的內容"}}`
+	fs.WriteFile("user1/NOTE/工作/修改的筆記.json", []byte(noteJSON))
 
-# 修改的筆記
-
-更新後的內容
-`
-	fs.WriteFile("user1/NOTE/工作/修改的筆記.md", []byte(mdContent))
-
-	entries, err := imp.ProcessDiff("user1", nil, []string{"NOTE/工作/修改的筆記.md"}, nil, nil, nil)
+	entries, err := imp.ProcessDiff("user1", nil, []string{"NOTE/工作/修改的筆記.json"}, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,15 +55,12 @@ updatedAt: "1709000000000"
 	if entries[0].Action != ImportActionUpdate {
 		t.Errorf("action: got %q, want %q", entries[0].Action, ImportActionUpdate)
 	}
-	if entries[0].HTMLHash != "newHash" {
-		t.Errorf("htmlHash: got %q, want %q", entries[0].HTMLHash, "newHash")
-	}
 }
 
 func TestProcessDiff_DeletedNote(t *testing.T) {
 	imp, _ := setupImporterFS()
 
-	entries, err := imp.ProcessDiff("user1", nil, nil, []string{"NOTE/工作/刪除的筆記.md"}, nil, nil)
+	entries, err := imp.ProcessDiff("user1", nil, nil, []string{"NOTE/工作/刪除的筆記.json"}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,25 +72,30 @@ func TestProcessDiff_DeletedNote(t *testing.T) {
 	}
 }
 
+func TestProcessDiff_DeletedNote_WithBeforeIDMap(t *testing.T) {
+	imp, _ := setupImporterFS()
+
+	beforeIDMap := map[string]string{"NOTE/工作/刪除.json": "del-id"}
+	entries, err := imp.ProcessDiff("user1", nil, nil, []string{"NOTE/工作/刪除.json"}, nil, beforeIDMap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("got %d entries, want 1", len(entries))
+	}
+	if entries[0].DocID != "del-id" {
+		t.Errorf("docID: got %q, want %q", entries[0].DocID, "del-id")
+	}
+}
+
 func TestProcessDiff_MovedNote(t *testing.T) {
 	imp, fs := setupImporterFS()
 
-	mdContent := `---
-id: n1
-parentID: f2
-title: 搬移的筆記
-usn: 3
-htmlHash: sameHash
-createdAt: "1700000000000"
-updatedAt: "1709000000000"
----
-
-搬移後的筆記
-`
-	fs.WriteFile("user1/NOTE/生活/搬移的筆記.md", []byte(mdContent))
+	noteJSON := `{"id":"n1","name":"搬移的筆記","itemType":"NOTE","fields":{"parentID":"f2"}}`
+	fs.WriteFile("user1/NOTE/生活/搬移的筆記.json", []byte(noteJSON))
 
 	entries, err := imp.ProcessDiff("user1", nil, nil, nil, []MovedFileEntry{
-		{OldPath: "NOTE/工作/搬移的筆記.md", NewPath: "NOTE/生活/搬移的筆記.md"},
+		{OldPath: "NOTE/工作/搬移的筆記.json", NewPath: "NOTE/生活/搬移的筆記.json"},
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -130,18 +106,18 @@ updatedAt: "1709000000000"
 	if entries[0].Action != ImportActionMove {
 		t.Errorf("action: got %q, want %q", entries[0].Action, ImportActionMove)
 	}
-	if entries[0].OldPath != "NOTE/工作/搬移的筆記.md" {
+	if entries[0].OldPath != "NOTE/工作/搬移的筆記.json" {
 		t.Errorf("oldPath: got %q", entries[0].OldPath)
 	}
 }
 
-func TestProcessDiff_NewFolder(t *testing.T) {
+func TestProcessDiff_FolderCreated(t *testing.T) {
 	imp, fs := setupImporterFS()
 
-	folderJSON := `{"ID":"f-new","folderName":"新目錄","type":"NOTE"}`
-	fs.WriteFile("user1/NOTE/新目錄/_folder.json", []byte(folderJSON))
+	folderJSON := `{"id":"f-new","name":"新目錄","itemType":"NOTE_FOLDER","fields":{"noteNum":0}}`
+	fs.WriteFile("user1/NOTE/新目錄.json", []byte(folderJSON))
 
-	entries, err := imp.ProcessDiff("user1", []string{"NOTE/新目錄/_folder.json"}, nil, nil, nil, nil)
+	entries, err := imp.ProcessDiff("user1", []string{"NOTE/新目錄.json"}, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,22 +127,22 @@ func TestProcessDiff_NewFolder(t *testing.T) {
 	if entries[0].Collection != "item" {
 		t.Errorf("collection: got %q, want %q", entries[0].Collection, "item")
 	}
-	if entries[0].ItemType != "FOLDER" {
-		t.Errorf("itemType: got %q, want %q", entries[0].ItemType, "FOLDER")
+	if entries[0].ItemType != "NOTE_FOLDER" {
+		t.Errorf("itemType: got %q, want %q", entries[0].ItemType, "NOTE_FOLDER")
 	}
-	if entries[0].FolderMeta == nil {
-		t.Fatal("FolderMeta should not be nil")
+	if entries[0].ItemData == nil {
+		t.Fatal("ItemData should not be nil")
 	}
-	if entries[0].FolderMeta.ID != "f-new" {
-		t.Errorf("folder ID: got %q, want %q", entries[0].FolderMeta.ID, "f-new")
+	if entries[0].ItemData.ID != "f-new" {
+		t.Errorf("folder ID: got %q, want %q", entries[0].ItemData.ID, "f-new")
 	}
 }
 
 func TestProcessDiff_CardCreated(t *testing.T) {
 	imp, fs := setupImporterFS()
 
-	cardJSON := `{"id":"card1","parentID":"c1","name":"鼎泰豐","fields":"{\"店名\":\"鼎泰豐\"}"}`
-	fs.WriteFile("user1/CARD/美食/鼎泰豐.json", []byte(cardJSON))
+	cardJSON := `{"id":"card1","name":"鼎泰豐","itemType":"CARD","fields":{"parentID":"c1","fields":"{\"店名\":\"鼎泰豐\"}"}}`
+	fs.WriteFile("user1/CARD/美食/鼎泰��.json", []byte(cardJSON))
 
 	entries, err := imp.ProcessDiff("user1", []string{"CARD/美食/鼎泰豐.json"}, nil, nil, nil, nil)
 	if err != nil {
@@ -181,21 +157,21 @@ func TestProcessDiff_CardCreated(t *testing.T) {
 	if entries[0].ItemType != "CARD" {
 		t.Errorf("itemType: got %q, want %q", entries[0].ItemType, "CARD")
 	}
-	if entries[0].CardMeta.Name != "鼎泰豐" {
-		t.Errorf("card name: got %q", entries[0].CardMeta.Name)
+	if entries[0].ItemData.Name != "鼎泰豐" {
+		t.Errorf("card name: got %q", entries[0].ItemData.Name)
 	}
 }
 
 func TestProcessDiff_MixedChanges(t *testing.T) {
 	imp, fs := setupImporterFS()
 
-	fs.WriteFile("user1/NOTE/工作/新.md", []byte("---\nid: n1\nparentID: f1\ntitle: 新\nusn: 1\nhtmlHash: h1\ncreatedAt: \"0\"\nupdatedAt: \"0\"\n---\ncontent"))
-	fs.WriteFile("user1/NOTE/工作/改.md", []byte("---\nid: n2\nparentID: f1\ntitle: 改\nusn: 2\nhtmlHash: h2\ncreatedAt: \"0\"\nupdatedAt: \"0\"\n---\ncontent"))
+	fs.WriteFile("user1/NOTE/工作/新.json", []byte(`{"id":"n1","name":"新","itemType":"NOTE","fields":{"parentID":"f1","content":"content"}}`))
+	fs.WriteFile("user1/NOTE/工作/改.json", []byte(`{"id":"n2","name":"改","itemType":"NOTE","fields":{"parentID":"f1","content":"content"}}`))
 
 	entries, err := imp.ProcessDiff("user1",
-		[]string{"NOTE/工作/新.md"},
-		[]string{"NOTE/工作/改.md"},
-		[]string{"NOTE/工作/刪.md"},
+		[]string{"NOTE/工作/新.json"},
+		[]string{"NOTE/工作/改.json"},
+		[]string{"NOTE/工作/刪.json"},
 		nil,
 		nil,
 	)
@@ -255,70 +231,17 @@ func TestProcessDiff_NewFormat_FallbackNameCleared(t *testing.T) {
 	}
 }
 
-func TestProcessDiff_OldFolderJSON_StillWorks(t *testing.T) {
+func TestProcessDiff_NonJSONFile_Skipped(t *testing.T) {
 	imp, fs := setupImporterFS()
 
-	folderJSON := `{"ID":"f1","folderName":"舊資料夾","type":"NOTE"}`
-	fs.WriteFile("user1/NOTE/舊資料夾/_folder.json", []byte(folderJSON))
+	fs.WriteFile("user1/NOTE/工作/test.md", []byte("# Hello"))
 
-	entries, err := imp.ProcessDiff("user1", []string{"NOTE/舊資料夾/_folder.json"}, nil, nil, nil, nil)
+	entries, err := imp.ProcessDiff("user1", []string{"NOTE/工作/test.md"}, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 {
-		t.Fatalf("got %d entries, want 1", len(entries))
-	}
-	if entries[0].FolderMeta == nil {
-		t.Fatal("old format _folder.json should still parse as FolderMeta")
-	}
-	if entries[0].ItemData != nil {
-		t.Error("old format should NOT produce ItemData")
-	}
-}
-
-func TestDetectItemType_GenericRootDir(t *testing.T) {
-	tests := []struct {
-		path     string
-		expected string
-	}{
-		{"KANBAN/board/task.json", "KANBAN"},
-		{"WHITEBOARD/stuff/drawing.json", "WHITEBOARD"},
-		{"NOTE/folder/note.md", "NOTE"},
-		{"CARD/list/card.json", "CARD"},
-	}
-	for _, tt := range tests {
-		got := detectItemType(tt.path)
-		if got != tt.expected {
-			t.Errorf("detectItemType(%q): got %q, want %q", tt.path, got, tt.expected)
-		}
-	}
-}
-
-func TestDetectItemType(t *testing.T) {
-	tests := []struct {
-		path     string
-		expected string
-	}{
-		{"NOTE/工作/_folder.json", "FOLDER"},
-		{"NOTE/工作/test.md", "NOTE"},
-		{"CARD/美食/鼎泰豐.json", "CARD"},
-		{"CHART/月營收/Q4.json", "CHART"},
-		{"TODO/待辦/task.md", "TODO"},
-	}
-	for _, tt := range tests {
-		got := detectItemType(tt.path)
-		if got != tt.expected {
-			t.Errorf("detectItemType(%q): got %q, want %q", tt.path, got, tt.expected)
-		}
-	}
-}
-
-func TestDetectCollection_AlwaysReturnsItem(t *testing.T) {
-	paths := []string{"NOTE/test.md", "CARD/test.json", "_folder.json"}
-	for _, p := range paths {
-		got := detectCollection(p)
-		if got != "item" {
-			t.Errorf("detectCollection(%q): got %q, want %q", p, got, "item")
-		}
+	// Non-JSON files are skipped (logged), so entries should be empty
+	if len(entries) != 0 {
+		t.Errorf("got %d entries, want 0 (non-json should be skipped)", len(entries))
 	}
 }
