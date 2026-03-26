@@ -158,6 +158,16 @@ func (h *WsHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *WsHandler) handleMessage(session *WsSession, sessionKey string, msg map[string]interface{}) {
+	// 0. Credits check — 額度不足就拒絕
+	if err := h.checkCredits(session.memberID); err != nil {
+		session.Send(map[string]interface{}{
+			"type":     "stream_error",
+			"memberID": session.memberID,
+			"error":    err.Error(),
+		})
+		return
+	}
+
 	// message 可能是 string（直接文字）或 object（{role, content}）
 	messageText, _ := msg["message"].(string)
 	if messageText == "" {
@@ -308,11 +318,26 @@ func (h *WsHandler) handleMessage(session *WsSession, sessionKey string, msg map
 			})
 
 		case eventType == "result" && subtype == "success":
-			if tu, ok := parsed["cost_usd"]; ok {
-				if b, err := json.Marshal(map[string]interface{}{"cost_usd": tu}); err == nil {
-					tokenUsage = b
-				}
+			// CLI result event contains: total_cost_usd, usage{input_tokens, output_tokens, ...}, modelUsage
+			usageData := map[string]interface{}{}
+			if cost, ok := parsed["total_cost_usd"]; ok {
+				usageData["total_cost_usd"] = cost
 			}
+			if usage, ok := parsed["usage"].(map[string]interface{}); ok {
+				usageData["input_tokens"] = usage["input_tokens"]
+				usageData["output_tokens"] = usage["output_tokens"]
+				usageData["cache_creation_input_tokens"] = usage["cache_creation_input_tokens"]
+				usageData["cache_read_input_tokens"] = usage["cache_read_input_tokens"]
+			}
+			if mu, ok := parsed["modelUsage"]; ok {
+				usageData["modelUsage"] = mu
+			}
+			if b, err := json.Marshal(usageData); err == nil && len(usageData) > 0 {
+				tokenUsage = b
+			}
+
+			// Record usage to Python billing API (fire-and-forget)
+			go h.recordBilling(session.memberID, session.mode, session.threadID, parsed)
 		}
 	}
 
@@ -515,4 +540,88 @@ func formatToolCall(event map[string]interface{}) map[string]interface{} {
 			"arguments": string(input),
 		},
 	}
+}
+
+// checkCredits checks if the user has sufficient credits before processing.
+// Calls MemberCenter's quota check API.
+func (h *WsHandler) checkCredits(memberID string) error {
+	mcURL := os.Getenv("MEMBERCENTER_URL")
+	if mcURL == "" {
+		mcURL = "http://membercenter.svc.local:3006"
+	}
+
+	reqBody, _ := json.Marshal(map[string]string{"memberId": memberID})
+	resp, err := http.Post(mcURL+"/api/internal/quota/ai/check", "application/json", bytes.NewReader(reqBody))
+	if err != nil {
+		log.Printf("[WS] credits check failed (allowing): %v", err)
+		return nil // fail open — don't block if check fails
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Allowed bool   `json:"allowed"`
+			Reason  string `json:"reason"`
+			Balance float64 `json:"balance"`
+		} `json:"data"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&result) != nil {
+		return nil // fail open
+	}
+
+	if result.Success && result.Data.Allowed == false {
+		return fmt.Errorf("INSUFFICIENT_CREDITS: 額度不足 (餘額: %.2f)", result.Data.Balance)
+	}
+	return nil
+}
+
+// recordBilling sends usage data to Python billing API after CLI response.
+func (h *WsHandler) recordBilling(memberID, mode, threadID string, resultEvent map[string]interface{}) {
+	aiServiceURL := os.Getenv("AI_SERVICE_URL")
+	if aiServiceURL == "" {
+		aiServiceURL = "http://chatbot.svc.local:8000"
+	}
+
+	usage, _ := resultEvent["usage"].(map[string]interface{})
+	if usage == nil {
+		return
+	}
+
+	inputTokens, _ := usage["input_tokens"].(float64)
+	outputTokens, _ := usage["output_tokens"].(float64)
+	cacheCreation, _ := usage["cache_creation_input_tokens"].(float64)
+	cacheRead, _ := usage["cache_read_input_tokens"].(float64)
+
+	// Extract model name from modelUsage
+	modelName := "claude-sonnet-4-6"
+	if mu, ok := resultEvent["modelUsage"].(map[string]interface{}); ok {
+		for name := range mu {
+			modelName = name
+			break
+		}
+	}
+
+	body := map[string]interface{}{
+		"member_id":              memberID,
+		"model":                  modelName,
+		"input_tokens":           int(inputTokens),
+		"output_tokens":          int(outputTokens),
+		"cache_creation_tokens":  int(cacheCreation),
+		"cache_read_tokens":      int(cacheRead),
+		"category":               mode,
+		"action":                 "response",
+		"thread_id":              threadID,
+		"mode":                   mode,
+	}
+
+	reqBody, _ := json.Marshal(body)
+	resp, err := http.Post(aiServiceURL+"/api/billing/record", "application/json", bytes.NewReader(reqBody))
+	if err != nil {
+		log.Printf("[WS] billing record failed: %v", err)
+		return
+	}
+	resp.Body.Close()
+	log.Printf("[WS] billing recorded: model=%s in=%d out=%d cache_create=%d cache_read=%d",
+		modelName, int(inputTokens), int(outputTokens), int(cacheCreation), int(cacheRead))
 }
