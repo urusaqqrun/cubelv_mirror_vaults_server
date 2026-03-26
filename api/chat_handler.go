@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"github.com/urusaqqrun/vault-mirror-service/database"
+	"github.com/urusaqqrun/vault-mirror-service/mirror"
 )
 
 // ChatStore defines the database operations required by ChatHandler and WsHandler.
@@ -24,11 +25,12 @@ type ChatStore interface {
 type ChatHandler struct {
 	store     ChatStore
 	wsHandler *WsHandler
+	vaultFS   mirror.VaultFS
 }
 
 // NewChatHandler creates a ChatHandler backed by the given store.
-func NewChatHandler(store ChatStore) *ChatHandler {
-	return &ChatHandler{store: store}
+func NewChatHandler(store ChatStore, vaultFS mirror.VaultFS) *ChatHandler {
+	return &ChatHandler{store: store, vaultFS: vaultFS}
 }
 
 // SetWsHandler sets the WebSocket handler for session status lookups.
@@ -43,7 +45,7 @@ func (h *ChatHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /get_sessions", h.GetSessions)
 	mux.HandleFunc("POST /add_session", h.AddSession)
 	mux.HandleFunc("POST /get_session_status", h.GetSessionStatus)
-	mux.HandleFunc("DELETE /api/internal/user/{member_id}/sessions", h.DeleteUserSessions)
+	mux.HandleFunc("DELETE /api/internal/user/{member_id}/data", h.DeleteUserData)
 }
 
 // GetMessagesAfterCheckpoint returns messages after a checkpoint (cursor).
@@ -166,19 +168,34 @@ func (h *ChatHandler) GetSessionStatus(w http.ResponseWriter, r *http.Request) {
 	chatWriteJSON(w, http.StatusOK, map[string]string{"status": status})
 }
 
-// DeleteUserSessions deletes all sessions and chat messages for a user.
-func (h *ChatHandler) DeleteUserSessions(w http.ResponseWriter, r *http.Request) {
+// DeleteUserData deletes all user data: sessions, chat messages, and vault files.
+// Called when a user deletes their account from MemberCenter.
+func (h *ChatHandler) DeleteUserData(w http.ResponseWriter, r *http.Request) {
 	memberID := r.PathValue("member_id")
+	log.Printf("[ChatHandler] DeleteUserData: cleaning up member %s", memberID)
+
+	// 1. Delete sessions + chat messages from DB
 	sessionsDeleted, msgsDeleted, err := h.store.DeleteUserSessions(r.Context(), memberID)
 	if err != nil {
 		log.Printf("[ChatHandler] DeleteUserSessions error: %v", err)
-		chatWriteError(w, http.StatusInternalServerError, err.Error())
-		return
 	}
+
+	// 2. Delete vault directory on EFS
+	vaultDeleted := false
+	if h.vaultFS != nil {
+		if err := h.vaultFS.RemoveAll(memberID); err != nil {
+			log.Printf("[ChatHandler] DeleteVault error for %s: %v", memberID, err)
+		} else {
+			vaultDeleted = true
+			log.Printf("[ChatHandler] Vault deleted for %s", memberID)
+		}
+	}
+
 	chatWriteJSON(w, http.StatusOK, map[string]interface{}{
-		"success":            true,
-		"sessionsDeleted":    sessionsDeleted,
-		"checkpointsDeleted": msgsDeleted,
+		"success":         true,
+		"sessionsDeleted": sessionsDeleted,
+		"messagesDeleted": msgsDeleted,
+		"vaultDeleted":    vaultDeleted,
 	})
 }
 

@@ -105,7 +105,7 @@ func main() {
 	mux := http.NewServeMux()
 	taskHandler.RegisterRoutes(mux)
 
-	chatHandler := api.NewChatHandler(pgStore)
+	chatHandler := api.NewChatHandler(pgStore, vaultFS)
 	chatHandler.RegisterRoutes(mux)
 
 	wsHandler := api.NewWsHandler(taskExec, taskStore, pgStore, cfg.VaultRoot, vaultFS)
