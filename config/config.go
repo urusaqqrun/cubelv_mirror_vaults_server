@@ -9,10 +9,6 @@ type Config struct {
 	AnthropicKey string
 	Port         string
 
-	// 並發控制
-	MaxConcurrentTasks int
-	TaskTimeoutMinutes int
-
 	// 同步 worker
 	SyncLoopIntervalSec int
 	SyncCursorLeaseSec  int
@@ -27,8 +23,6 @@ func Load() *Config {
 		VaultRoot:           getEnv("VAULT_ROOT", "/vaults"),
 		AnthropicKey:        getEnv("ANTHROPIC_API_KEY", ""),
 		Port:                getEnv("PORT", "8080"),
-		MaxConcurrentTasks:  getEnvInt("MAX_CONCURRENT_TASKS", 3),
-		TaskTimeoutMinutes:  getEnvInt("TASK_TIMEOUT_MINUTES", 10),
 		SyncLoopIntervalSec: getEnvInt("SYNC_LOOP_INTERVAL_SEC", 30),
 		SyncCursorLeaseSec:  getEnvInt("SYNC_CURSOR_LEASE_SEC", 120),
 		SyncOwnerScanLimit:  getEnvInt("SYNC_OWNER_SCAN_LIMIT", 128),

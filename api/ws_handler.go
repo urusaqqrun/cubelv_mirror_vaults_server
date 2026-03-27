@@ -43,13 +43,6 @@ func (s *WsSession) Send(msg map[string]interface{}) error {
 	return s.conn.WriteJSON(msg)
 }
 
-// StreamTaskExecutor is the interface for streaming task execution.
-// ExecuteStream returns (vaultChanged, error).
-type StreamTaskExecutor interface {
-	ExecuteStream(task *Task, eventCh chan<- executor.StreamEvent) (bool, error)
-	Cancel(taskID string) error
-}
-
 // SnapshotStore DB-based vault snapshot CRUD.
 type SnapshotStore interface {
 	GetSnapshot(ctx context.Context, memberID string) ([]database.SnapshotRow, error)
@@ -61,8 +54,6 @@ type SnapshotStore interface {
 
 // WsHandler is the WebSocket endpoint handler.
 type WsHandler struct {
-	executor      StreamTaskExecutor
-	store         TaskStore
 	chatStore     ChatStore
 	snapshotStore SnapshotStore
 	vaultRoot     string
@@ -72,10 +63,8 @@ type WsHandler struct {
 }
 
 // NewWsHandler creates a new WsHandler.
-func NewWsHandler(exec StreamTaskExecutor, store TaskStore, chatStore ChatStore, snapshotStore SnapshotStore, vaultRoot string, vaultFS mirror.VaultFS) *WsHandler {
+func NewWsHandler(chatStore ChatStore, snapshotStore SnapshotStore, vaultRoot string, vaultFS mirror.VaultFS) *WsHandler {
 	return &WsHandler{
-		executor:      exec,
-		store:         store,
 		chatStore:     chatStore,
 		snapshotStore: snapshotStore,
 		vaultRoot:     vaultRoot,
