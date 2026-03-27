@@ -11,13 +11,14 @@ import (
 
 // SessionMessage represents a chat message used for JSONL session rebuild.
 type SessionMessage struct {
-	ID         string          `json:"id"`
-	Role       string          `json:"role"`
-	Content    string          `json:"content"`
-	Thinking   string          `json:"thinking,omitempty"`
-	ToolCalls  json.RawMessage `json:"tool_calls,omitempty"`
-	ToolCallID string          `json:"tool_call_id,omitempty"`
-	CreatedAt  time.Time       `json:"created_at"`
+	ID            string          `json:"id"`
+	Role          string          `json:"role"`
+	Content       string          `json:"content"`
+	Thinking      string          `json:"thinking,omitempty"`
+	ToolCalls     json.RawMessage `json:"tool_calls,omitempty"`
+	ToolCallID    string          `json:"tool_call_id,omitempty"`
+	AttachedItems json.RawMessage `json:"attached_items,omitempty"`
+	CreatedAt     time.Time       `json:"created_at"`
 }
 
 // jsonlEntry is the per-line structure written to the .jsonl session file.
@@ -77,11 +78,35 @@ func RebuildSessionJSONL(sessionID, workDir, memberID string, messages []Session
 		switch msg.Role {
 		case "user":
 			entry.Type = "user"
+
+			// 檢查 attachedItems 中是否有圖片
+			var imageBlocks []interface{}
+			if len(msg.AttachedItems) > 0 && string(msg.AttachedItems) != "null" {
+				var items []map[string]interface{}
+				if json.Unmarshal(msg.AttachedItems, &items) == nil {
+					for _, item := range items {
+						if itemType, _ := item["type"].(string); itemType == "image" {
+							if url, _ := item["url"].(string); url != "" {
+								imageBlocks = append(imageBlocks, map[string]interface{}{
+									"type": "image",
+									"source": map[string]interface{}{
+										"type": "url",
+										"url":  url,
+									},
+								})
+							}
+						}
+					}
+				}
+			}
+
+			var content []interface{}
+			content = append(content, imageBlocks...)
+			content = append(content, map[string]string{"type": "text", "text": msg.Content})
+
 			entry.Message = jsonlMessage{
-				Role: "user",
-				Content: []interface{}{
-					map[string]string{"type": "text", "text": msg.Content},
-				},
+				Role:    "user",
+				Content: content,
 			}
 
 		case "assistant":

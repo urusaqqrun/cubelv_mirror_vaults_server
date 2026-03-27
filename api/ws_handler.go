@@ -209,13 +209,14 @@ func (h *WsHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 				smList := make([]executor.SessionMessage, 0, len(msgs))
 				for _, m := range msgs {
 					smList = append(smList, executor.SessionMessage{
-						ID:         m.ID,
-						Role:       m.Role,
-						Content:    m.Content,
-						Thinking:   m.Thinking,
-						ToolCalls:  m.ToolCalls,
-						ToolCallID: m.ToolCallID,
-						CreatedAt:  m.CreatedAt,
+						ID:            m.ID,
+						Role:          m.Role,
+						Content:       m.Content,
+						Thinking:      m.Thinking,
+						ToolCalls:     m.ToolCalls,
+						ToolCallID:    m.ToolCallID,
+						AttachedItems: m.AttachedItems,
+						CreatedAt:     m.CreatedAt,
 					})
 				}
 
@@ -292,9 +293,12 @@ func (h *WsHandler) handleMessage(session *WsSession, sessionKey string, msg map
 		return
 	}
 
+	// 解析 message 物件
+	var msgObj map[string]interface{}
 	messageText, _ := msg["message"].(string)
 	if messageText == "" {
-		if msgObj, ok := msg["message"].(map[string]interface{}); ok {
+		msgObj, _ = msg["message"].(map[string]interface{})
+		if msgObj != nil {
 			messageText, _ = msgObj["content"].(string)
 		}
 	}
@@ -319,9 +323,12 @@ func (h *WsHandler) handleMessage(session *WsSession, sessionKey string, msg map
 		Role:      "user",
 		Content:   messageText,
 	}
-	if items, ok := msg["attachedItems"]; ok {
-		if b, err := json.Marshal(items); err == nil {
-			userMsg.AttachedItems = b
+	// attachedItems 在 msg["message"] 內，不在頂層
+	if msgObj != nil {
+		if items, ok := msgObj["attachedItems"]; ok {
+			if b, err := json.Marshal(items); err == nil {
+				userMsg.AttachedItems = b
+			}
 		}
 	}
 	h.chatStore.InsertChatMessage(context.Background(), userMsg)
@@ -363,8 +370,20 @@ func (h *WsHandler) handleMessage(session *WsSession, sessionKey string, msg map
 	}
 
 	// 5. Send message to StreamCLI
+	// 組裝完整指令：messageText + pageContext + attachedItems metadata
+	pageCtx, _ := msg["pageContext"].(map[string]interface{})
+	instruction := buildInstruction(messageText, msgObj, pageCtx)
+
+	// 檢查是否有圖片附件，有的話組成多模態 content blocks
+	var cliContent interface{} = instruction
+	if msgObj != nil {
+		if blocks := buildContentBlocks(instruction, msgObj); blocks != nil {
+			cliContent = blocks
+		}
+	}
+
 	sendStart := time.Now()
-	eventCh, err := cli.SendMessage(messageText)
+	eventCh, err := cli.SendMessage(cliContent)
 	log.Printf("[CacheProfile] sendMessage DONE — %dms", time.Since(sendStart).Milliseconds())
 	if err != nil {
 		session.Send(map[string]interface{}{
@@ -761,13 +780,14 @@ func (h *WsHandler) rebuildSessionJSONL(session *WsSession, workDir string) {
 	smList := make([]executor.SessionMessage, 0, len(msgs))
 	for _, m := range msgs {
 		smList = append(smList, executor.SessionMessage{
-			ID:         m.ID,
-			Role:       m.Role,
-			Content:    m.Content,
-			Thinking:   m.Thinking,
-			ToolCalls:  m.ToolCalls,
-			ToolCallID: m.ToolCallID,
-			CreatedAt:  m.CreatedAt,
+			ID:            m.ID,
+			Role:          m.Role,
+			Content:       m.Content,
+			Thinking:      m.Thinking,
+			ToolCalls:     m.ToolCalls,
+			ToolCallID:    m.ToolCallID,
+			AttachedItems: m.AttachedItems,
+			CreatedAt:     m.CreatedAt,
 		})
 	}
 
@@ -864,8 +884,95 @@ func (h *WsHandler) GetSessionStatus(memberID, sessionID string) string {
 	return "idle"
 }
 
-func buildInstruction(messageText string, msg map[string]interface{}) string {
-	return messageText
+func buildInstruction(messageText string, msgObj map[string]interface{}, pageCtx map[string]interface{}) string {
+	var parts []string
+	parts = append(parts, messageText)
+
+	// 1. pageContext → 告訴 AI 用戶當前在看什麼
+	if pageCtx != nil {
+		if folder, ok := pageCtx["folder"].(map[string]interface{}); ok {
+			pageID, _ := folder["pageId"].(string)
+			pageName, _ := folder["pageName"].(string)
+			pageType, _ := folder["pageType"].(string)
+			parts = append(parts, fmt.Sprintf("\n[目前所在資料夾] ID: %s, 名稱: %s, 類型: %s", pageID, pageName, pageType))
+		}
+		if item, ok := pageCtx["item"].(map[string]interface{}); ok {
+			pageID, _ := item["pageId"].(string)
+			pageName, _ := item["pageName"].(string)
+			parts = append(parts, fmt.Sprintf("\n[目前選取項目] ID: %s, 名稱: %s", pageID, pageName))
+		}
+	}
+
+	// 2. attachedItems → 非圖片類展開為文字描述
+	if msgObj != nil {
+		if items, ok := msgObj["attachedItems"].([]interface{}); ok {
+			for _, raw := range items {
+				item, ok := raw.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				itemType, _ := item["type"].(string)
+				if itemType == "image" {
+					continue // 圖片由 buildContentBlocks 處理
+				}
+				name, _ := item["name"].(string)
+				if name == "" {
+					name, _ = item["title"].(string)
+				}
+				id, _ := item["id"].(string)
+				iType, _ := item["itemType"].(string)
+				parts = append(parts, fmt.Sprintf("\n[附加項目] 類型: %s, ID: %s, 名稱: %s", iType, id, name))
+			}
+		}
+	}
+
+	return strings.Join(parts, "")
+}
+
+// buildContentBlocks 檢查 attachedItems 中是否有圖片，
+// 有的話組成多模態 content blocks 陣列（image URL + text）。
+// 無圖片時回傳 nil，表示用純文字即可。
+func buildContentBlocks(instruction string, msgObj map[string]interface{}) []map[string]interface{} {
+	items, ok := msgObj["attachedItems"].([]interface{})
+	if !ok {
+		return nil
+	}
+
+	var imageBlocks []map[string]interface{}
+	for _, raw := range items {
+		item, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		itemType, _ := item["type"].(string)
+		if itemType != "image" {
+			continue
+		}
+		url, _ := item["url"].(string)
+		if url == "" {
+			continue
+		}
+		imageBlocks = append(imageBlocks, map[string]interface{}{
+			"type": "image",
+			"source": map[string]interface{}{
+				"type": "url",
+				"url":  url,
+			},
+		})
+	}
+
+	if len(imageBlocks) == 0 {
+		return nil // 無圖片，走純文字路徑
+	}
+
+	// 有圖片：組成 content blocks 陣列（先圖片後文字）
+	var blocks []map[string]interface{}
+	blocks = append(blocks, imageBlocks...)
+	blocks = append(blocks, map[string]interface{}{
+		"type": "text",
+		"text": instruction,
+	})
+	return blocks
 }
 
 func formatToolCall(event map[string]interface{}) map[string]interface{} {

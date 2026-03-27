@@ -336,7 +336,8 @@ func NewStreamCLI(workDir, scope, userID, sessionID string, resume bool, idleTTL
 }
 
 // SendMessage 寫入使用者訊息，回傳 stdout 事件 channel（result 事件後關閉）
-func (s *StreamCLI) SendMessage(message string) (<-chan StreamEvent, error) {
+// content 可以是 string（純文字）或 []map[string]interface{}（多模態 content blocks）
+func (s *StreamCLI) SendMessage(content interface{}) (<-chan StreamEvent, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -346,11 +347,20 @@ func (s *StreamCLI) SendMessage(message string) (<-chan StreamEvent, error) {
 
 	s.resetIdleTimer()
 
+	// 根據 content 類型構建 message
+	var msgContent interface{}
+	switch c := content.(type) {
+	case string:
+		msgContent = c // 純字串，CLI 直接吃
+	default:
+		msgContent = c // content blocks 陣列，CLI 也直接吃
+	}
+
 	msg := map[string]interface{}{
 		"type": "user",
-		"message": map[string]string{
+		"message": map[string]interface{}{
 			"role":    "user",
-			"content": message,
+			"content": msgContent,
 		},
 	}
 	data, err := json.Marshal(msg)
