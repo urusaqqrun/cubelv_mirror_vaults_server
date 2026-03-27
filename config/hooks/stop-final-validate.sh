@@ -62,7 +62,7 @@ while IFS= read -r folder_json; do
     REL=$(echo "$PARENT" | sed "s|$CWD/||")
     append_error "${REL}/ 同時包含筆記和子資料夾（不允許）"
   fi
-done < <(find "$CWD" -name "_folder.json" -not -path "*/.NoteCEO/*" 2>/dev/null)
+done < <(find "$CWD" -name "_folder.json" -not -path "*/.CubeLV/*" 2>/dev/null)
 
 # 檢查 2：所有 .md 檔案必須有 frontmatter id 和 parentID
 while IFS= read -r md_file; do
@@ -78,7 +78,7 @@ while IFS= read -r md_file; do
       append_error "${REL} 缺少 frontmatter ${MISSING} 欄位"
     fi
   fi
-done < <(find "$CWD" -name "*.md" -not -name "CLAUDE.md" -not -path "*/.NoteCEO/*" 2>/dev/null)
+done < <(find "$CWD" -name "*.md" -not -name "CLAUDE.md" -not -path "*/.CubeLV/*" 2>/dev/null)
 
 # 檢查 3：所有 _folder.json 必須保留 ID
 while IFS= read -r folder_json; do
@@ -87,13 +87,13 @@ while IFS= read -r folder_json; do
     REL=$(echo "$folder_json" | sed "s|$CWD/||")
     append_error "${REL} 缺少 ID 欄位"
   fi
-done < <(find "$CWD" -name "_folder.json" -not -path "*/.NoteCEO/*" 2>/dev/null)
+done < <(find "$CWD" -name "_folder.json" -not -path "*/.CubeLV/*" 2>/dev/null)
 
 # 檢查 4：禁止使用 symlink，避免繞過路徑隔離
 while IFS= read -r symlink_path; do
   REL=$(echo "$symlink_path" | sed "s|$CWD/||")
   append_error "${REL} 是 symlink，不允許存在"
-done < <(find "$CWD" -type l -not -path "*/.NoteCEO/*" 2>/dev/null)
+done < <(find "$CWD" -type l -not -path "*/.CubeLV/*" 2>/dev/null)
 
 if [ -n "$ERRORS" ]; then
   REASON=$(echo -e "以下問題需要修正：\n$ERRORS")

@@ -255,6 +255,7 @@ func NewStreamCLI(workDir, scope, userID, resumeSessionID string, idleTTL time.D
 	vaultClaudeMD := filepath.Join(workDir, "CLAUDE.md")
 	args := []string{
 		"--bare",
+		"--tools", "default",
 		"--print",
 		"--output-format", "stream-json",
 		"--include-partial-messages",
