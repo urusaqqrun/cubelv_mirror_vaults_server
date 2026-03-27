@@ -7,7 +7,6 @@ import (
 	"io/fs"
 	"log"
 	"strings"
-	"time"
 
 	"github.com/urusaqqrun/vault-mirror-service/mirror"
 )
@@ -75,14 +74,13 @@ func TakeSnapshotAndPathIDMap(vaultFS mirror.VaultFS, userID string) (map[string
 	return snap, idMap, nil
 }
 
-// TakeIncrementalSnapshot 增量快照：只對 mtime 比 since 更新的檔案重新讀取+hash，
-// 其餘沿用 prev 的資料。同時偵測新增與刪除。
+// TakeIncrementalSnapshot 增量快照：比對每個檔案的 mtime 與 prev 記錄，
+// 只有 mtime 不同或新增的檔案才重新讀取+hash，其餘沿用 prev。
 func TakeIncrementalSnapshot(
 	vaultFS mirror.VaultFS,
 	userID string,
 	prev map[string]FileSnapshot,
 	prevIDMap map[string]string,
-	since time.Time,
 ) (map[string]FileSnapshot, map[string]string, error) {
 	snap := make(map[string]FileSnapshot, len(prev))
 	idMap := make(map[string]string, len(prevIDMap))
@@ -102,8 +100,7 @@ func TakeIncrementalSnapshot(
 			return nil
 		}
 
-		// mtime 沒變且 prev 有記錄 → 直接沿用
-		if old, ok := prev[relPath]; ok && !info.ModTime().After(since) {
+		if old, ok := prev[relPath]; ok && old.ModTime.UnixMilli() == info.ModTime().UnixMilli() {
 			snap[relPath] = old
 			if id, ok2 := prevIDMap[relPath]; ok2 {
 				idMap[relPath] = id
@@ -112,7 +109,6 @@ func TakeIncrementalSnapshot(
 			return nil
 		}
 
-		// mtime 有變或新檔案 → 讀檔 + hash
 		data, rErr := vaultFS.ReadFile(path)
 		if rErr != nil {
 			return nil

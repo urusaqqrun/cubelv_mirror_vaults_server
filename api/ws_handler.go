@@ -34,10 +34,6 @@ type WsSession struct {
 	status    string // idle, asking, interrupted
 	mu        sync.Mutex
 	cli       *executor.StreamCLI
-
-	cachedSnap  map[string]executor.FileSnapshot
-	cachedIDMap map[string]string
-	snapTime    time.Time
 }
 
 // Send writes a JSON message to the WebSocket connection (thread-safe).
@@ -54,28 +50,37 @@ type StreamTaskExecutor interface {
 	Cancel(taskID string) error
 }
 
-// warmSnapshot 快取的快照資料，用於 warmup → WS session 傳遞
-type warmSnapshot struct {
-	snap  map[string]executor.FileSnapshot
-	idMap map[string]string
-	time  time.Time
+// SnapshotStore DB-based vault snapshot CRUD.
+type SnapshotStore interface {
+	GetSnapshot(ctx context.Context, memberID string) ([]database.SnapshotRow, error)
+	UpsertSnapshotFiles(ctx context.Context, memberID string, files []database.SnapshotRow) error
+	DeleteSnapshotFiles(ctx context.Context, memberID string, paths []string) error
+	ReplaceSnapshot(ctx context.Context, memberID string, files []database.SnapshotRow) error
+	SnapshotExists(ctx context.Context, memberID string) (bool, error)
 }
 
 // WsHandler is the WebSocket endpoint handler.
 type WsHandler struct {
-	executor  StreamTaskExecutor
-	store     TaskStore
-	chatStore ChatStore
-	vaultRoot string
-	vaultFS   mirror.VaultFS
-	sessions  sync.Map // sessionKey -> *WsSession
-	cliPool   sync.Map // memberID -> *executor.StreamCLI (warmup pool)
-	snapPool  sync.Map // memberID -> *warmSnapshot (warmup snapshot pool)
+	executor      StreamTaskExecutor
+	store         TaskStore
+	chatStore     ChatStore
+	snapshotStore SnapshotStore
+	vaultRoot     string
+	vaultFS       mirror.VaultFS
+	sessions      sync.Map // sessionKey -> *WsSession
+	cliPool       sync.Map // memberID -> *executor.StreamCLI (warmup pool)
 }
 
 // NewWsHandler creates a new WsHandler.
-func NewWsHandler(exec StreamTaskExecutor, store TaskStore, chatStore ChatStore, vaultRoot string, vaultFS mirror.VaultFS) *WsHandler {
-	return &WsHandler{executor: exec, store: store, chatStore: chatStore, vaultRoot: vaultRoot, vaultFS: vaultFS}
+func NewWsHandler(exec StreamTaskExecutor, store TaskStore, chatStore ChatStore, snapshotStore SnapshotStore, vaultRoot string, vaultFS mirror.VaultFS) *WsHandler {
+	return &WsHandler{
+		executor:      exec,
+		store:         store,
+		chatStore:     chatStore,
+		snapshotStore: snapshotStore,
+		vaultRoot:     vaultRoot,
+		vaultFS:       vaultFS,
+	}
 }
 
 // RegisterRoutes registers the WebSocket route on the provided mux.
@@ -84,7 +89,7 @@ func (h *WsHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /cli_warmup", h.HandleWarmup)
 }
 
-// HandleWarmup pre-warms a CLI process into the pool for a member.
+// HandleWarmup pre-warms a CLI process and takes a full snapshot → DB.
 func (h *WsHandler) HandleWarmup(w http.ResponseWriter, r *http.Request) {
 	memberID := r.URL.Query().Get("memberID")
 	if memberID == "" {
@@ -117,7 +122,10 @@ func (h *WsHandler) HandleWarmup(w http.ResponseWriter, r *http.Request) {
 		if snapErr != nil {
 			log.Printf("[Warmup] snapshot failed for %s: %v", memberID, snapErr)
 		} else {
-			h.snapPool.Store(memberID, &warmSnapshot{snap: snap, idMap: idMap, time: time.Now()})
+			rows := snapshotToDBRows(snap, idMap)
+			if dbErr := h.snapshotStore.ReplaceSnapshot(context.Background(), memberID, rows); dbErr != nil {
+				log.Printf("[Warmup] DB snapshot store failed for %s: %v", memberID, dbErr)
+			}
 		}
 		log.Printf("[CacheProfile] Warmup DONE — cli=%dms, snapshot=%dms, files=%d, member=%s, pid=%d",
 			time.Since(warmupStart).Milliseconds(), time.Since(snapStart).Milliseconds(),
@@ -142,7 +150,6 @@ func (h *WsHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify JWT: reject guest users
 	if token == "" {
 		http.Error(w, "token required", 401)
 		return
@@ -191,26 +198,12 @@ func (h *WsHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		wsCliStart := time.Now()
 		workDir := filepath.Join(h.vaultRoot, memberID)
 
-		// 嘗試從 snapPool 取得 warmup 時預拍的快照
-		loadWarmSnapshot := func() {
-			if val, loaded := h.snapPool.LoadAndDelete(memberID); loaded {
-				ws := val.(*warmSnapshot)
-				session.mu.Lock()
-				session.cachedSnap = ws.snap
-				session.cachedIDMap = ws.idMap
-				session.snapTime = ws.time
-				session.mu.Unlock()
-				log.Printf("[CacheProfile] WS goroutine: loaded warm snapshot — files=%d", len(ws.snap))
-			}
-		}
-
 		if isNew {
 			if val, loaded := h.cliPool.LoadAndDelete(memberID); loaded {
 				if cli, ok := val.(*executor.StreamCLI); ok && cli.IsAlive() {
 					session.mu.Lock()
 					session.cli = cli
 					session.mu.Unlock()
-					loadWarmSnapshot()
 					log.Printf("[CacheProfile] WS goroutine: reused warm CLI — %dms, pid=%d",
 						time.Since(wsCliStart).Milliseconds(), cli.Pid())
 					return
@@ -224,7 +217,6 @@ func (h *WsHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 			session.mu.Lock()
 			session.cli = cli
 			session.mu.Unlock()
-			loadWarmSnapshot()
 			log.Printf("[CacheProfile] WS goroutine: new CLI for new session — %dms, pid=%d",
 				time.Since(wsCliStart).Milliseconds(), cli.Pid())
 			return
@@ -266,7 +258,6 @@ func (h *WsHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 				session.mu.Lock()
 				session.cli = cli
 				session.mu.Unlock()
-				loadWarmSnapshot()
 				log.Printf("[CacheProfile] WS goroutine: CLI resumed — total %dms, session=%s",
 					time.Since(wsCliStart).Milliseconds(), sessionID)
 				return
@@ -281,7 +272,6 @@ func (h *WsHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		session.mu.Lock()
 		session.cli = cli
 		session.mu.Unlock()
-		loadWarmSnapshot()
 		log.Printf("[CacheProfile] WS goroutine: new CLI (no history) — %dms, pid=%d",
 			time.Since(wsCliStart).Milliseconds(), cli.Pid())
 	}()
@@ -316,7 +306,6 @@ func (h *WsHandler) handleMessage(session *WsSession, sessionKey string, msg map
 	handleStart := time.Now()
 	log.Printf("[CacheProfile] handleMessage START — member=%s session=%s", session.memberID, session.sessionID)
 
-	// 0. Credits check — 額度不足就拒絕
 	if err := h.checkCredits(session.memberID); err != nil {
 		session.Send(map[string]interface{}{
 			"type":     "stream_error",
@@ -326,7 +315,6 @@ func (h *WsHandler) handleMessage(session *WsSession, sessionKey string, msg map
 		return
 	}
 
-	// message 可能是 string（直接文字）或 object（{role, content}）
 	messageText, _ := msg["message"].(string)
 	if messageText == "" {
 		if msgObj, ok := msg["message"].(map[string]interface{}); ok {
@@ -350,9 +338,9 @@ func (h *WsHandler) handleMessage(session *WsSession, sessionKey string, msg map
 	// 1. Save user message
 	userMsg := &database.ChatMessage{
 		SessionID: session.sessionID,
-		Mode:     session.mode,
-		Role:     "user",
-		Content:  messageText,
+		Mode:      session.mode,
+		Role:      "user",
+		Content:   messageText,
 	}
 	if items, ok := msg["attachedItems"]; ok {
 		if b, err := json.Marshal(items); err == nil {
@@ -380,8 +368,6 @@ func (h *WsHandler) handleMessage(session *WsSession, sessionKey string, msg map
 		"memberID": session.memberID,
 	})
 
-	// First message on this CLI → cache miss, show "正在準備 CLI 環境"
-	// Subsequent messages → cache hit, skip (frontend shows "正在思考" by default)
 	isCacheBuilding := !cli.CacheBuilt
 	if isCacheBuilding {
 		session.Send(map[string]interface{}{
@@ -389,27 +375,14 @@ func (h *WsHandler) handleMessage(session *WsSession, sessionKey string, msg map
 		})
 	}
 
-	// 4. Take vault snapshot BEFORE CLI runs (for diff + writeback)
+	// 4. snapshot_before: read from DB
 	snapBeforeStart := time.Now()
-	session.mu.Lock()
-	beforeSnap := session.cachedSnap
-	beforeIDMap := session.cachedIDMap
-	session.mu.Unlock()
-
-	var snapErr error
-	if beforeSnap == nil {
-		beforeSnap, beforeIDMap, snapErr = executor.TakeSnapshotAndPathIDMap(
-			h.vaultFS, session.memberID,
-		)
-		log.Printf("[CacheProfile] snapshot_before FULL (no cache) — %dms, files=%d",
-			time.Since(snapBeforeStart).Milliseconds(), len(beforeSnap))
-	} else {
-		log.Printf("[CacheProfile] snapshot_before FROM CACHE — 0ms, files=%d",
-			len(beforeSnap))
-	}
-	messageStartTime := time.Now()
+	beforeSnap, beforeIDMap, snapErr := h.loadBeforeSnapshot(session.memberID)
 	if snapErr != nil {
 		log.Printf("[WS] snapshot before error: %v", snapErr)
+	} else {
+		log.Printf("[CacheProfile] snapshot_before — %dms, files=%d",
+			time.Since(snapBeforeStart).Milliseconds(), len(beforeSnap))
 	}
 
 	// 5. Send message to StreamCLI
@@ -444,7 +417,6 @@ func (h *WsHandler) handleMessage(session *WsSession, sessionKey string, msg map
 				time.Since(sendStart).Milliseconds(), time.Since(handleStart).Milliseconds(), isCacheBuilding)
 		}
 
-		// First stdout event after cache building → send cli_ready, mark cache as built
 		if isCacheBuilding && !cliReadySent {
 			cliReadySent = true
 			cli.CacheBuilt = true
@@ -510,8 +482,6 @@ func (h *WsHandler) handleMessage(session *WsSession, sessionKey string, msg map
 			}
 
 		case eventType == "assistant":
-			// assistant 事件在 --print --include-partial-messages 下也會出現（累積內容）
-			// 只在 stream_event 尚未送過時才做 fallback
 			if msgContent, ok := parsed["message"].(map[string]interface{}); ok {
 				if contentArr, ok := msgContent["content"].([]interface{}); ok {
 					for _, block := range contentArr {
@@ -662,11 +632,11 @@ func (h *WsHandler) handleMessage(session *WsSession, sessionKey string, msg map
 		"token_usage":    tokenUsage,
 	})
 
-	// 9. Vault diff + writeback (post-CLI) — incremental snapshot
+	// 9. snapshot_after: incremental EFS scan + diff + DB update
 	if snapErr == nil {
 		snapAfterStart := time.Now()
 		afterSnap, afterIDMap, afterErr := executor.TakeIncrementalSnapshot(
-			h.vaultFS, session.memberID, beforeSnap, beforeIDMap, messageStartTime,
+			h.vaultFS, session.memberID, beforeSnap, beforeIDMap,
 		)
 		if afterErr != nil {
 			log.Printf("[WS] incremental snapshot after error: %v", afterErr)
@@ -677,14 +647,8 @@ func (h *WsHandler) handleMessage(session *WsSession, sessionKey string, msg map
 				time.Since(snapAfterStart).Milliseconds(), hasChanges,
 				len(diff.Created), len(diff.Modified), len(diff.Deleted), len(diff.Moved))
 
-			// 更新快取給下次訊息使用
-			session.mu.Lock()
-			session.cachedSnap = afterSnap
-			session.cachedIDMap = afterIDMap
-			session.snapTime = time.Now()
-			session.mu.Unlock()
-
 			if hasChanges {
+				h.updateDBSnapshot(session.memberID, afterSnap, afterIDMap, diff)
 				session.Send(map[string]interface{}{
 					"type":     "vault_changed",
 					"memberID": session.memberID,
@@ -700,7 +664,70 @@ func (h *WsHandler) handleMessage(session *WsSession, sessionKey string, msg map
 	go h.maybeGenerateTitle(session, messageText, accumulatedText)
 }
 
-// ensureCLI 取得活著的 StreamCLI，死了就用 --resume 重啟
+// loadBeforeSnapshot reads the snapshot from DB. Falls back to full EFS scan
+// if no DB record exists (first use), and stores the result to DB.
+func (h *WsHandler) loadBeforeSnapshot(memberID string) (map[string]executor.FileSnapshot, map[string]string, error) {
+	ctx := context.Background()
+	rows, err := h.snapshotStore.GetSnapshot(ctx, memberID)
+	if err == nil && len(rows) > 0 {
+		snap, idMap := dbRowsToSnapshot(rows)
+		return snap, idMap, nil
+	}
+
+	log.Printf("[CacheProfile] snapshot DB empty for %s, doing full EFS scan", memberID)
+	snap, idMap, scanErr := executor.TakeSnapshotAndPathIDMap(h.vaultFS, memberID)
+	if scanErr != nil {
+		return nil, nil, scanErr
+	}
+
+	dbRows := snapshotToDBRows(snap, idMap)
+	if storeErr := h.snapshotStore.ReplaceSnapshot(ctx, memberID, dbRows); storeErr != nil {
+		log.Printf("[WS] DB snapshot initial store failed for %s: %v", memberID, storeErr)
+	}
+	return snap, idMap, nil
+}
+
+// updateDBSnapshot applies diff changes to the DB snapshot incrementally.
+func (h *WsHandler) updateDBSnapshot(memberID string, afterSnap map[string]executor.FileSnapshot, afterIDMap map[string]string, diff executor.VaultDiff) {
+	ctx := context.Background()
+
+	var upserts []database.SnapshotRow
+	for _, p := range diff.Created {
+		if fs, ok := afterSnap[p]; ok {
+			upserts = append(upserts, database.SnapshotRow{
+				FilePath: p, Hash: fs.Hash, Mtime: fs.ModTime.UnixMilli(), DocID: afterIDMap[p],
+			})
+		}
+	}
+	for _, p := range diff.Modified {
+		if fs, ok := afterSnap[p]; ok {
+			upserts = append(upserts, database.SnapshotRow{
+				FilePath: p, Hash: fs.Hash, Mtime: fs.ModTime.UnixMilli(), DocID: afterIDMap[p],
+			})
+		}
+	}
+	for _, mv := range diff.Moved {
+		if fs, ok := afterSnap[mv.NewPath]; ok {
+			upserts = append(upserts, database.SnapshotRow{
+				FilePath: mv.NewPath, Hash: fs.Hash, Mtime: fs.ModTime.UnixMilli(), DocID: afterIDMap[mv.NewPath],
+			})
+		}
+	}
+	if err := h.snapshotStore.UpsertSnapshotFiles(ctx, memberID, upserts); err != nil {
+		log.Printf("[WS] DB snapshot upsert error: %v", err)
+	}
+
+	var deletes []string
+	deletes = append(deletes, diff.Deleted...)
+	for _, mv := range diff.Moved {
+		deletes = append(deletes, mv.OldPath)
+	}
+	if err := h.snapshotStore.DeleteSnapshotFiles(ctx, memberID, deletes); err != nil {
+		log.Printf("[WS] DB snapshot delete error: %v", err)
+	}
+}
+
+// ensureCLI returns an alive StreamCLI, rebuilding with --resume if needed.
 func (h *WsHandler) ensureCLI(session *WsSession) *executor.StreamCLI {
 	session.mu.Lock()
 	cli := session.cli
@@ -774,37 +801,6 @@ func (h *WsHandler) rebuildSessionJSONL(session *WsSession, workDir string) {
 	}
 }
 
-// diffAndNotify computes the vault diff after CLI execution and triggers writeback.
-// Returns true if the vault changed.
-func (h *WsHandler) diffAndNotify(
-	session *WsSession,
-	beforeSnap map[string]executor.FileSnapshot,
-	beforeIDMap map[string]string,
-) bool {
-	afterSnap, err := executor.TakeSnapshot(h.vaultFS, session.memberID)
-	if err != nil {
-		log.Printf("[WS] snapshot after error: %v", err)
-		return false
-	}
-
-	diff := executor.ComputeDiff(beforeSnap, afterSnap)
-	hasChanges := len(diff.Created)+len(diff.Modified)+len(diff.Deleted)+len(diff.Moved) > 0
-	if !hasChanges {
-		return false
-	}
-
-	log.Printf("[WS-Persistent] diff: +%d ~%d -%d mv%d",
-		len(diff.Created), len(diff.Modified), len(diff.Deleted), len(diff.Moved))
-
-	// Writeback is delegated to the fullTaskExecutor via ExecuteStream in the
-	// non-persistent path. For persistent CLI, the ws_handler signals
-	// vault_changed and the caller (main.go fullTaskExecutor) is not involved.
-	// The actual DB writeback for persistent mode will be handled by the sync
-	// worker picking up filesystem changes.
-	return true
-}
-
-
 func (h *WsHandler) handleInterrupt(session *WsSession) {
 	session.mu.Lock()
 	if session.cli != nil {
@@ -820,7 +816,6 @@ func (h *WsHandler) handleInterrupt(session *WsSession) {
 }
 
 func (h *WsHandler) maybeGenerateTitle(session *WsSession, userMsg, assistantMsg string) {
-	// Only generate title for the first message in a session
 	msgs, _, err := h.chatStore.GetMessagesAfter(context.Background(), session.sessionID, session.mode, "", 5)
 	if err != nil || len(msgs) > 2 {
 		return
@@ -831,7 +826,6 @@ func (h *WsHandler) maybeGenerateTitle(session *WsSession, userMsg, assistantMsg
 
 	log.Printf("[WS] generating title for session %s via ai-service...", session.sessionID)
 
-	// Call Python ai-service's generate_thread_title endpoint (uses GPT-4o-mini)
 	aiServiceURL := os.Getenv("AI_SERVICE_URL")
 	if aiServiceURL == "" {
 		aiServiceURL = "http://chatbot.svc.local:8000"
@@ -894,7 +888,6 @@ func (h *WsHandler) GetSessionStatus(memberID, sessionID string) string {
 }
 
 func buildInstruction(messageText string, msg map[string]interface{}) string {
-	// Simple version; can be extended for attachment handling
 	return messageText
 }
 
@@ -910,8 +903,39 @@ func formatToolCall(event map[string]interface{}) map[string]interface{} {
 	}
 }
 
-// checkCredits checks if the user has sufficient credits before processing.
-// Calls MemberCenter's quota check API.
+// --- Snapshot DB <-> memory conversion helpers ---
+
+func snapshotToDBRows(snap map[string]executor.FileSnapshot, idMap map[string]string) []database.SnapshotRow {
+	rows := make([]database.SnapshotRow, 0, len(snap))
+	for path, fs := range snap {
+		rows = append(rows, database.SnapshotRow{
+			FilePath: path,
+			Hash:     fs.Hash,
+			Mtime:    fs.ModTime.UnixMilli(),
+			DocID:    idMap[path],
+		})
+	}
+	return rows
+}
+
+func dbRowsToSnapshot(rows []database.SnapshotRow) (map[string]executor.FileSnapshot, map[string]string) {
+	snap := make(map[string]executor.FileSnapshot, len(rows))
+	idMap := make(map[string]string, len(rows))
+	for _, r := range rows {
+		snap[r.FilePath] = executor.FileSnapshot{
+			Path:    r.FilePath,
+			Hash:    r.Hash,
+			ModTime: time.UnixMilli(r.Mtime),
+		}
+		if r.DocID != "" {
+			idMap[r.FilePath] = r.DocID
+		}
+	}
+	return snap, idMap
+}
+
+// --- Credits & Billing ---
+
 func (h *WsHandler) checkCredits(memberID string) error {
 	mcURL := os.Getenv("MEMBERCENTER_URL")
 	if mcURL == "" {
@@ -922,20 +946,20 @@ func (h *WsHandler) checkCredits(memberID string) error {
 	resp, err := http.Post(mcURL+"/api/internal/quota/ai/check", "application/json", bytes.NewReader(reqBody))
 	if err != nil {
 		log.Printf("[WS] credits check failed (allowing): %v", err)
-		return nil // fail open — don't block if check fails
+		return nil
 	}
 	defer resp.Body.Close()
 
 	var result struct {
 		Success bool `json:"success"`
 		Data    struct {
-			Allowed bool   `json:"allowed"`
-			Reason  string `json:"reason"`
+			Allowed bool    `json:"allowed"`
+			Reason  string  `json:"reason"`
 			Balance float64 `json:"balance"`
 		} `json:"data"`
 	}
 	if json.NewDecoder(resp.Body).Decode(&result) != nil {
-		return nil // fail open
+		return nil
 	}
 
 	if result.Success && result.Data.Allowed == false {
@@ -944,7 +968,6 @@ func (h *WsHandler) checkCredits(memberID string) error {
 	return nil
 }
 
-// recordBilling sends usage data to Python billing API after CLI response.
 func (h *WsHandler) recordBilling(memberID, mode, sessionID string, resultEvent map[string]interface{}) {
 	aiServiceURL := os.Getenv("AI_SERVICE_URL")
 	if aiServiceURL == "" {
@@ -961,7 +984,6 @@ func (h *WsHandler) recordBilling(memberID, mode, sessionID string, resultEvent 
 	cacheCreation, _ := usage["cache_creation_input_tokens"].(float64)
 	cacheRead, _ := usage["cache_read_input_tokens"].(float64)
 
-	// Extract model name from modelUsage
 	modelName := "claude-sonnet-4-6"
 	if mu, ok := resultEvent["modelUsage"].(map[string]interface{}); ok {
 		for name := range mu {
@@ -971,16 +993,16 @@ func (h *WsHandler) recordBilling(memberID, mode, sessionID string, resultEvent 
 	}
 
 	body := map[string]interface{}{
-		"member_id":              memberID,
-		"model":                  modelName,
-		"input_tokens":           int(inputTokens),
-		"output_tokens":          int(outputTokens),
-		"cache_creation_tokens":  int(cacheCreation),
-		"cache_read_tokens":      int(cacheRead),
-		"category":               mode,
-		"action":                 "response",
-		"session_id":             sessionID,
-		"mode":                   mode,
+		"member_id":             memberID,
+		"model":                 modelName,
+		"input_tokens":          int(inputTokens),
+		"output_tokens":         int(outputTokens),
+		"cache_creation_tokens": int(cacheCreation),
+		"cache_read_tokens":     int(cacheRead),
+		"category":              mode,
+		"action":                "response",
+		"session_id":            sessionID,
+		"mode":                  mode,
 	}
 
 	reqBody, _ := json.Marshal(body)
@@ -994,7 +1016,6 @@ func (h *WsHandler) recordBilling(memberID, mode, sessionID string, resultEvent 
 		modelName, int(inputTokens), int(outputTokens), int(cacheCreation), int(cacheRead))
 }
 
-// extractJWTRole decodes the JWT payload (without verification) and returns the role claim.
 func extractJWTRole(token string) string {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {

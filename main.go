@@ -50,6 +50,9 @@ func main() {
 	if err := pgStore.EnsureSessionMappingConstraint(ctx); err != nil {
 		log.Printf("EnsureSessionMappingConstraint 警告: %v", err)
 	}
+	if err := pgStore.EnsureVaultSnapshotsTable(ctx); err != nil {
+		log.Fatalf("EnsureVaultSnapshotsTable 失敗: %v", err)
+	}
 
 	// VaultFS（EFS 實作）
 	vaultFS := &mirror.RealVaultFS{Root: cfg.VaultRoot}
@@ -108,7 +111,7 @@ func main() {
 	chatHandler := api.NewChatHandler(pgStore, vaultFS)
 	chatHandler.RegisterRoutes(mux)
 
-	wsHandler := api.NewWsHandler(taskExec, taskStore, pgStore, cfg.VaultRoot, vaultFS)
+	wsHandler := api.NewWsHandler(taskExec, taskStore, pgStore, pgStore, cfg.VaultRoot, vaultFS)
 	wsHandler.RegisterRoutes(mux)
 	chatHandler.SetWsHandler(wsHandler)
 
