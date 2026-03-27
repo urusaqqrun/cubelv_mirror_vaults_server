@@ -1,6 +1,7 @@
 package mirror
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"path/filepath"
@@ -105,6 +106,30 @@ func (imp *Importer) parseFile(userId, path string, action ImportAction) (Import
 	mirrorItem, err := MirrorJSONToItem(data)
 	if err != nil {
 		return ImportEntry{}, fmt.Errorf("parse json %s: %w", path, err)
+	}
+
+	// 從目錄結構推算 parentID
+	// path 格式: TYPE/folder/item.json → dir = TYPE/folder → parent file = TYPE/folder.json
+	// path 格式: TYPE/item.json → dir = TYPE (type root) → no parent
+	dir := filepath.Dir(path)
+	dirParts := strings.Split(filepath.ToSlash(dir), "/")
+	if len(dirParts) > 1 {
+		// 不在 type root 直接下層，有 parent
+		parentName := dirParts[len(dirParts)-1]
+		grandDir := strings.Join(dirParts[:len(dirParts)-1], "/")
+		parentFilePath := filepath.Join(userId, grandDir, parentName+".json")
+		parentData, readErr := imp.fs.ReadFile(parentFilePath)
+		if readErr == nil {
+			var parentDoc struct {
+				ID string `json:"id"`
+			}
+			if json.Unmarshal(parentData, &parentDoc) == nil && parentDoc.ID != "" {
+				if mirrorItem.Fields == nil {
+					mirrorItem.Fields = make(map[string]interface{})
+				}
+				mirrorItem.Fields["parentID"] = parentDoc.ID
+			}
+		}
 	}
 
 	// vault fallback name 不回寫到 DB

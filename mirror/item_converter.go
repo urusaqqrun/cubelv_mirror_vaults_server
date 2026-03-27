@@ -11,8 +11,12 @@ func ItemToMirrorData(item *model.Item) ItemMirrorData {
 		name = VaultFallbackName(item.ID)
 	}
 	// 深拷貝 Fields 避免共用 map reference 導致原始 Item 被異動
+	// parentID 不寫入 JSON，父子關係由目錄結構決定
 	fields := make(map[string]interface{}, len(item.Fields))
 	for k, v := range item.Fields {
+		if k == "parentID" {
+			continue
+		}
 		fields[k] = v
 	}
 	return ItemMirrorData{

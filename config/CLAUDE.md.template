@@ -15,20 +15,32 @@
 
 ## JSON 格式
 
-每個 .json 檔案格式如下（所有欄位放在頂層）：
+每個 .json 檔案格式如下（所有欄位放在頂層，**不含 parentID**）：
 ```json
-{"id":"24字元hex","name":"名稱","itemType":"NOTE","parentID":"父項ID或null","version":1,"createdAt":"毫秒時間戳","updatedAt":"毫秒時間戳","content":"內容","tags":[]}
+{"id":"24字元hex","name":"名稱","itemType":"NOTE","version":1,"createdAt":"毫秒時間戳","updatedAt":"毫秒時間戳","content":"內容","tags":[]}
 ```
 id 用 24 字元 hex（如 `a3f8c21d4e9b70500000001`）。createdAt/updatedAt 用 Unix 毫秒時間戳字串。
+**parentID 不寫在 JSON 裡**，父子關係由目錄結構決定（系統轉換時自動推算）。
+
+## Vault 層級結構（嚴格遵守）
+
+```
+根目錄（NOTE/、TODO/、CARD/、CHART/）
+  └─ _FOLDER（NOTE_FOLDER、TODO_FOLDER、CARD_FOLDER、CHART_FOLDER）
+       └─ item（NOTE、TODO、CARD、CHART）或子 _FOLDER
+```
+
+- **根目錄（NOTE/、TODO/、CARD/、CHART/）禁止直接建立或編輯任何 item**，只能包含 _FOLDER
+- **item 必須放在對應的 _FOLDER 目錄下**，不能直接放在根目錄
+- **_FOLDER 內不能同時有子 _FOLDER 和一般 item**（要嘛全是子 _FOLDER，要嘛全是一般 item）
+- 建立任何 item 時，如果使用者沒指定資料夾，必須先建立或找到對應的 _FOLDER，再把 item 放進去
+- **搬移 item = 搬移 .json 檔案到目標 _FOLDER 目錄**，不需要改 JSON 內容
 
 ## 規則
 
-1. 不要刪除任何 .json 中的 id、parentID 欄位
-2. 搬移 item 時更新 parentID
-3. 改名 item 時同步調整 .json 與同名子目錄
-4. 使用 Bash 時只用明確的絕對路徑
-5. 建立資料夾型 item（如 CARD_FOLDER）時，parentID 設為 null
-6. 建立子 item（如 CARD）時，parentID 設為資料夾的 id
+1. 不要刪除任何 .json 中的 id 欄位
+2. 改名 item 時同步調整 .json 檔名與同名子目錄
+3. 使用 Bash 時只用明確的絕對路徑
 
 ## AI Service API
 
@@ -52,6 +64,11 @@ curl -s -X POST {AI_SERVICE_URL}/cubelv/search_card_image \
 
 讀 .schemas/ 下各個 type 的 .json 檔，每個 type 可能有 aiHints 欄位，列出該 type 的特殊操作指示。
 aiHints 中的 {AI_SERVICE_URL} 請替換為實際 API URL。
+
+## AI Skills
+
+如果 .skills/ 目錄存在，讀取裡面的 .md 檔案。每個檔案是一個插件提供的技能指令。
+檔名即技能名稱（不含 .md），內容是該技能的操作說明，請嚴格遵守。
 
 ## 語言
 
