@@ -252,7 +252,7 @@ type StreamCLI struct {
 }
 
 // NewStreamCLI 啟動帶有 streaming 功能的長駐 CLI
-func NewStreamCLI(workDir, scope, userID, resumeSessionID string, idleTTL time.Duration) (*StreamCLI, error) {
+func NewStreamCLI(workDir, scope, userID, sessionID string, resume bool, idleTTL time.Duration) (*StreamCLI, error) {
 	funcStart := time.Now()
 
 	vaultClaudeMD := filepath.Join(workDir, "CLAUDE.md")
@@ -270,9 +270,14 @@ func NewStreamCLI(workDir, scope, userID, resumeSessionID string, idleTTL time.D
 		"--append-system-prompt-file", vaultClaudeMD,
 	}
 
-	if resumeSessionID != "" {
-		args = append(args, "--resume", resumeSessionID)
-		log.Printf("[StreamCLI] resuming session %s", resumeSessionID)
+	if sessionID != "" {
+		if resume {
+			args = append(args, "--resume", sessionID)
+			log.Printf("[StreamCLI] resuming session %s", sessionID)
+		} else {
+			args = append(args, "--session-id", sessionID)
+			log.Printf("[StreamCLI] new session with ID %s", sessionID)
+		}
 	}
 
 	cmd := exec.Command("claude", args...)
@@ -299,8 +304,8 @@ func NewStreamCLI(workDir, scope, userID, resumeSessionID string, idleTTL time.D
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start claude cli: %w", err)
 	}
-	log.Printf("[CacheProfile] cmd.Start DONE — %dms, pid=%d, workDir=%s, resume=%s",
-		time.Since(cmdStartTime).Milliseconds(), cmd.Process.Pid, workDir, resumeSessionID)
+	log.Printf("[CacheProfile] cmd.Start DONE — %dms, pid=%d, workDir=%s, sessionID=%s, resume=%v",
+		time.Since(cmdStartTime).Milliseconds(), cmd.Process.Pid, workDir, sessionID, resume)
 
 	// 背景讀取 stderr 並寫入 log，避免 CLI 錯誤被靜默吞掉
 	go func() {
@@ -320,13 +325,13 @@ func NewStreamCLI(workDir, scope, userID, resumeSessionID string, idleTTL time.D
 		stdout:    scanner,
 		idleTTL:   idleTTL,
 		workDir:   workDir,
-		sessionID: resumeSessionID,
+		sessionID: sessionID,
 		alive:     true,
 	}
 	s.resetIdleTimer()
 
-	log.Printf("[CacheProfile] NewStreamCLI total — %dms, pid=%d, workDir=%s, resume=%s",
-		time.Since(funcStart).Milliseconds(), cmd.Process.Pid, workDir, resumeSessionID)
+	log.Printf("[CacheProfile] NewStreamCLI total — %dms, pid=%d, workDir=%s, sessionID=%s, resume=%v",
+		time.Since(funcStart).Milliseconds(), cmd.Process.Pid, workDir, sessionID, resume)
 	return s, nil
 }
 

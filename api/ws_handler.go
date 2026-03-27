@@ -99,7 +99,7 @@ func (h *WsHandler) HandleWarmup(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		warmupStart := time.Now()
 		workDir := filepath.Join(h.vaultRoot, memberID)
-		cli, err := executor.NewStreamCLI(workDir, "chat", memberID, "", 5*time.Minute)
+		cli, err := executor.NewStreamCLI(workDir, "chat", memberID, "", false, 5*time.Minute)
 		if err != nil {
 			log.Printf("[Warmup] CLI start failed for %s: %v", memberID, err)
 			return
@@ -186,7 +186,7 @@ func (h *WsHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			}
-			cli, err := executor.NewStreamCLI(workDir, "chat", memberID, "", 5*time.Minute)
+			cli, err := executor.NewStreamCLI(workDir, "chat", memberID, sessionID, false, 5*time.Minute)
 			if err != nil {
 				log.Printf("[WS] CLI start failed for %s: %v", memberID, err)
 				return
@@ -227,7 +227,7 @@ func (h *WsHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 						time.Since(rebuildStart).Milliseconds(), len(smList))
 				}
 
-				cli, err := executor.NewStreamCLI(workDir, "chat", memberID, sessionID, 5*time.Minute)
+				cli, err := executor.NewStreamCLI(workDir, "chat", memberID, sessionID, true, 5*time.Minute)
 				if err != nil {
 					log.Printf("[WS] CLI resume start failed for %s: %v", memberID, err)
 					return
@@ -241,7 +241,7 @@ func (h *WsHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		cli, err := executor.NewStreamCLI(workDir, "chat", memberID, "", 5*time.Minute)
+		cli, err := executor.NewStreamCLI(workDir, "chat", memberID, sessionID, false, 5*time.Minute)
 		if err != nil {
 			log.Printf("[WS] CLI start failed for %s: %v", memberID, err)
 			return
@@ -730,7 +730,7 @@ func (h *WsHandler) ensureCLI(session *WsSession) *executor.StreamCLI {
 	log.Printf("[CacheProfile] rebuildSessionJSONL DONE — %dms", time.Since(rebuildStart).Milliseconds())
 
 	cliStart := time.Now()
-	newCLI, err := executor.NewStreamCLI(workDir, "chat", session.memberID, session.sessionID, 5*time.Minute)
+	newCLI, err := executor.NewStreamCLI(workDir, "chat", session.memberID, session.sessionID, true, 5*time.Minute)
 	if err != nil {
 		log.Printf("[CacheProfile] NewStreamCLI FAILED — %dms, error=%v", time.Since(cliStart).Milliseconds(), err)
 		return nil
