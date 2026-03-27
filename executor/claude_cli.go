@@ -233,37 +233,36 @@ func (e *ClaudeExecutor) ExecuteTaskStream(
 }
 
 // ---------------------------------------------------------------------------
-// PersistentCLI — keeps a single Claude CLI process alive across messages
+// StreamCLI — 長駐 process，用 --print --input-format stream-json 取得真正逐字串流
 // ---------------------------------------------------------------------------
 
-// PersistentCLI wraps a long-lived Claude CLI process that communicates via
-// --input-format stream-json / --output-format stream-json on stdin/stdout.
-type PersistentCLI struct {
+// StreamCLI 長駐 Claude CLI process，stdin 送訊息、stdout 逐字串流
+type StreamCLI struct {
 	cmd       *exec.Cmd
 	stdin     io.WriteCloser
 	stdout    *bufio.Scanner
 	mu        sync.Mutex
+	workDir   string
+	sessionID string
+	alive     bool
 	idleTimer *time.Timer
 	idleTTL   time.Duration
-	workDir   string
-	sessionID string // CLI session UUID, used for --resume on restart
-	alive     bool
 }
 
-// NewPersistentCLI starts a persistent Claude CLI process.
-// The process reads stream-json from stdin and writes stream-json to stdout.
-// If resumeSessionID is non-empty, the CLI resumes the previous conversation.
-func NewPersistentCLI(workDir, scope, userID, resumeSessionID string, idleTTL time.Duration) (*PersistentCLI, error) {
+// NewStreamCLI 啟動帶有 streaming 功能的長駐 CLI
+func NewStreamCLI(workDir, scope, userID, resumeSessionID string, idleTTL time.Duration) (*StreamCLI, error) {
 	args := []string{
-		"--input-format", "stream-json",
+		"--print",
 		"--output-format", "stream-json",
+		"--include-partial-messages",
+		"--input-format", "stream-json",
 		"--verbose",
 		"--dangerously-skip-permissions",
 	}
 
 	if resumeSessionID != "" {
 		args = append(args, "--resume", resumeSessionID)
-		log.Printf("[PersistentCLI] resuming session %s", resumeSessionID)
+		log.Printf("[StreamCLI] resuming session %s", resumeSessionID)
 	}
 
 	cmd := exec.Command("claude", args...)
@@ -289,7 +288,7 @@ func NewPersistentCLI(workDir, scope, userID, resumeSessionID string, idleTTL ti
 	scanner := bufio.NewScanner(stdoutPipe)
 	scanner.Buffer(make([]byte, 256*1024), 256*1024)
 
-	p := &PersistentCLI{
+	s := &StreamCLI{
 		cmd:       cmd,
 		stdin:     stdinPipe,
 		stdout:    scanner,
@@ -298,25 +297,23 @@ func NewPersistentCLI(workDir, scope, userID, resumeSessionID string, idleTTL ti
 		sessionID: resumeSessionID,
 		alive:     true,
 	}
-	p.resetIdleTimer()
+	s.resetIdleTimer()
 
-	log.Printf("[PersistentCLI] started pid=%d workDir=%s resume=%s", cmd.Process.Pid, workDir, resumeSessionID)
-	return p, nil
+	log.Printf("[StreamCLI] started pid=%d workDir=%s resume=%s", cmd.Process.Pid, workDir, resumeSessionID)
+	return s, nil
 }
 
-// SendMessage writes a user message to stdin and returns a channel of stdout
-// StreamEvents. The channel is closed after a "type":"result" event is received.
-func (p *PersistentCLI) SendMessage(message string) (<-chan StreamEvent, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+// SendMessage 寫入使用者訊息，回傳 stdout 事件 channel（result 事件後關閉）
+func (s *StreamCLI) SendMessage(message string) (<-chan StreamEvent, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	if !p.alive {
+	if !s.alive {
 		return nil, fmt.Errorf("CLI process not alive")
 	}
 
-	p.resetIdleTimer()
+	s.resetIdleTimer()
 
-	// Write stream-json user message to stdin
 	msg := map[string]interface{}{
 		"type": "user",
 		"message": map[string]string{
@@ -329,89 +326,82 @@ func (p *PersistentCLI) SendMessage(message string) (<-chan StreamEvent, error) 
 		return nil, fmt.Errorf("marshal message: %w", err)
 	}
 	data = append(data, '\n')
-	if _, err := p.stdin.Write(data); err != nil {
-		p.alive = false
+	if _, err := s.stdin.Write(data); err != nil {
+		s.alive = false
 		return nil, fmt.Errorf("write stdin: %w", err)
 	}
 
-	ch := make(chan StreamEvent, 64)
+	ch := make(chan StreamEvent, 128)
 	go func() {
 		defer close(ch)
-		for p.stdout.Scan() {
-			line := p.stdout.Text()
+		for s.stdout.Scan() {
+			line := s.stdout.Text()
 			if line == "" {
 				continue
 			}
 			ch <- StreamEvent{Type: "stdout", Data: line}
 
-			// Check if this is the final result event
 			var parsed map[string]interface{}
 			if json.Unmarshal([]byte(line), &parsed) == nil {
 				if parsed["type"] == "result" {
-					// Capture session_id from result event for --resume on restart
 					if sid, ok := parsed["session_id"].(string); ok && sid != "" {
-						p.mu.Lock()
-						p.sessionID = sid
-						p.mu.Unlock()
+						s.mu.Lock()
+						s.sessionID = sid
+						s.mu.Unlock()
 					}
 					return
 				}
-				// Also try to capture from system init event
 				if parsed["type"] == "system" {
 					if sid, ok := parsed["session_id"].(string); ok && sid != "" {
-						p.mu.Lock()
-						p.sessionID = sid
-						p.mu.Unlock()
+						s.mu.Lock()
+						s.sessionID = sid
+						s.mu.Unlock()
 					}
 				}
 			}
 		}
-		// Scanner stopped — process likely died
-		p.mu.Lock()
-		p.alive = false
-		p.mu.Unlock()
+		// stdout 關閉 → process 已死
+		s.mu.Lock()
+		s.alive = false
+		s.mu.Unlock()
 	}()
 
 	return ch, nil
 }
 
-// Kill terminates the CLI process.
-func (p *PersistentCLI) Kill() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.idleTimer != nil {
-		p.idleTimer.Stop()
+func (s *StreamCLI) Kill() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.idleTimer != nil {
+		s.idleTimer.Stop()
 	}
-	if p.alive && p.cmd.Process != nil {
-		log.Printf("[PersistentCLI] killing pid=%d", p.cmd.Process.Pid)
-		_ = p.cmd.Process.Kill()
-		_ = p.cmd.Wait()
-		p.alive = false
+	if s.alive && s.cmd.Process != nil {
+		log.Printf("[StreamCLI] killing pid=%d", s.cmd.Process.Pid)
+		_ = s.cmd.Process.Kill()
+		_ = s.cmd.Wait()
+		s.alive = false
 	}
 }
 
-// IsAlive returns true if the CLI process is still running.
-func (p *PersistentCLI) IsAlive() bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.alive
+func (s *StreamCLI) IsAlive() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.alive
 }
 
-// SessionID returns the CLI session UUID (captured from result events).
-// Used for --resume when restarting after idle kill.
-func (p *PersistentCLI) SessionID() string {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.sessionID
+func (s *StreamCLI) SessionID() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sessionID
 }
 
-func (p *PersistentCLI) resetIdleTimer() {
-	if p.idleTimer != nil {
-		p.idleTimer.Stop()
+func (s *StreamCLI) resetIdleTimer() {
+	if s.idleTimer != nil {
+		s.idleTimer.Stop()
 	}
-	p.idleTimer = time.AfterFunc(p.idleTTL, func() {
-		log.Printf("[PersistentCLI] idle timeout, killing pid=%d", p.cmd.Process.Pid)
-		p.Kill()
+	s.idleTimer = time.AfterFunc(s.idleTTL, func() {
+		log.Printf("[StreamCLI] idle timeout, killing pid=%d", s.cmd.Process.Pid)
+		s.Kill()
 	})
 }
 
