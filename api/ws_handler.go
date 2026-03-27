@@ -26,15 +26,14 @@ var upgrader = websocket.Upgrader{
 
 // WsSession represents a single WebSocket connection session.
 type WsSession struct {
-	conn           *websocket.Conn
-	memberID       string
-	sessionID      string
-	mode           string
-	taskID         string
-	status         string // idle, asking, interrupted
-	cliSessionID   string // CLI session UUID for --resume after idle kill
-	mu             sync.Mutex
-	cli            *executor.PersistentCLI // persistent CLI process for this session
+	conn      *websocket.Conn
+	memberID  string
+	sessionID string
+	mode      string
+	taskID    string
+	status    string // idle, asking, interrupted
+	mu        sync.Mutex
+	cli       *executor.StreamCLI
 }
 
 // Send writes a JSON message to the WebSocket connection (thread-safe).
@@ -59,6 +58,7 @@ type WsHandler struct {
 	vaultRoot string
 	vaultFS   mirror.VaultFS
 	sessions  sync.Map // sessionKey -> *WsSession
+	cliPool   sync.Map // memberID -> *executor.StreamCLI (warmup pool)
 }
 
 // NewWsHandler creates a new WsHandler.
@@ -69,6 +69,41 @@ func NewWsHandler(exec StreamTaskExecutor, store TaskStore, chatStore ChatStore,
 // RegisterRoutes registers the WebSocket route on the provided mux.
 func (h *WsHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/ws/chat", h.HandleWebSocket)
+	mux.HandleFunc("POST /cli_warmup", h.HandleWarmup)
+}
+
+// HandleWarmup pre-warms a CLI process into the pool for a member.
+func (h *WsHandler) HandleWarmup(w http.ResponseWriter, r *http.Request) {
+	memberID := r.URL.Query().Get("memberID")
+	if memberID == "" {
+		http.Error(w, "memberID required", 400)
+		return
+	}
+
+	if val, ok := h.cliPool.Load(memberID); ok {
+		if cli, ok := val.(*executor.StreamCLI); ok && cli.IsAlive() {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(200)
+			json.NewEncoder(w).Encode(map[string]string{"status": "already_warm"})
+			return
+		}
+		h.cliPool.Delete(memberID)
+	}
+
+	go func() {
+		workDir := filepath.Join(h.vaultRoot, memberID)
+		cli, err := executor.NewStreamCLI(workDir, "chat", memberID, "", 5*time.Minute)
+		if err != nil {
+			log.Printf("[Warmup] CLI start failed for %s: %v", memberID, err)
+			return
+		}
+		h.cliPool.Store(memberID, cli)
+		log.Printf("[Warmup] CLI ready for %s (pid=%d)", memberID, cli.Pid())
+	}()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	json.NewEncoder(w).Encode(map[string]string{"status": "warming"})
 }
 
 // HandleWebSocket upgrades an HTTP connection to WebSocket and starts the read loop.
@@ -112,7 +147,6 @@ func (h *WsHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	h.sessions.Store(sessionKey, session)
 
 	defer func() {
-		// Kill persistent CLI on WebSocket close
 		session.mu.Lock()
 		if session.cli != nil {
 			session.cli.Kill()
@@ -128,18 +162,78 @@ func (h *WsHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		"sessionId": sessionKey,
 	})
 
-	// Pre-warm: start persistent CLI in background (no resume on first connect)
+	isNew := q.Get("isNew") == "true"
+
 	go func() {
 		workDir := filepath.Join(h.vaultRoot, memberID)
-		cli, err := executor.NewPersistentCLI(workDir, "chat", memberID, "", 5*time.Minute)
+
+		if isNew {
+			if val, loaded := h.cliPool.LoadAndDelete(memberID); loaded {
+				if cli, ok := val.(*executor.StreamCLI); ok && cli.IsAlive() {
+					session.mu.Lock()
+					session.cli = cli
+					session.mu.Unlock()
+					log.Printf("[WS] reused warm CLI for %s (pid=%d)", memberID, cli.Pid())
+					return
+				}
+			}
+			cli, err := executor.NewStreamCLI(workDir, "chat", memberID, "", 5*time.Minute)
+			if err != nil {
+				log.Printf("[WS] CLI start failed for %s: %v", memberID, err)
+				return
+			}
+			session.mu.Lock()
+			session.cli = cli
+			session.mu.Unlock()
+			log.Printf("[WS] new CLI for new session %s", memberID)
+			return
+		}
+
+		if sessionID != "" {
+			msgs, _, err := h.chatStore.GetMessagesAfter(
+				context.Background(), sessionID, mode, "", 200)
+			if err == nil && len(msgs) > 0 {
+				smList := make([]executor.SessionMessage, 0, len(msgs))
+				for _, m := range msgs {
+					smList = append(smList, executor.SessionMessage{
+						ID:         m.ID,
+						Role:       m.Role,
+						Content:    m.Content,
+						Thinking:   m.Thinking,
+						ToolCalls:  m.ToolCalls,
+						ToolCallID: m.ToolCallID,
+						CreatedAt:  m.CreatedAt,
+					})
+				}
+
+				if err := executor.RebuildSessionJSONL(sessionID, workDir, memberID, smList); err != nil {
+					log.Printf("[WS] rebuild JSONL error: %v", err)
+				} else {
+					log.Printf("[WS] rebuilt JSONL for %s (%d msgs)", sessionID, len(smList))
+				}
+
+				cli, err := executor.NewStreamCLI(workDir, "chat", memberID, sessionID, 5*time.Minute)
+				if err != nil {
+					log.Printf("[WS] CLI resume start failed for %s: %v", memberID, err)
+					return
+				}
+				session.mu.Lock()
+				session.cli = cli
+				session.mu.Unlock()
+				log.Printf("[WS] CLI resumed for %s (session=%s)", memberID, sessionID)
+				return
+			}
+		}
+
+		cli, err := executor.NewStreamCLI(workDir, "chat", memberID, "", 5*time.Minute)
 		if err != nil {
-			log.Printf("[WS] CLI pre-start failed for %s: %v", memberID, err)
+			log.Printf("[WS] CLI start failed for %s: %v", memberID, err)
 			return
 		}
 		session.mu.Lock()
 		session.cli = cli
 		session.mu.Unlock()
-		log.Printf("[WS] CLI pre-started for session %s", sessionKey)
+		log.Printf("[WS] new CLI (no history) for %s", memberID)
 	}()
 
 	// Read loop
@@ -214,7 +308,7 @@ func (h *WsHandler) handleMessage(session *WsSession, sessionKey string, msg map
 	}
 	h.chatStore.InsertChatMessage(context.Background(), userMsg)
 
-	// 2. Ensure persistent CLI is alive
+	// 2. Ensure StreamCLI is alive
 	cli := h.ensureCLI(session)
 	if cli == nil {
 		session.Send(map[string]interface{}{
@@ -248,7 +342,7 @@ func (h *WsHandler) handleMessage(session *WsSession, sessionKey string, msg map
 		log.Printf("[WS] snapshot before error: %v", snapErr)
 	}
 
-	// 5. Send message to persistent CLI
+	// 5. Send message to StreamCLI
 	eventCh, err := cli.SendMessage(messageText)
 	if err != nil {
 		session.Send(map[string]interface{}{
@@ -262,6 +356,7 @@ func (h *WsHandler) handleMessage(session *WsSession, sessionKey string, msg map
 	// 6. Push events to WebSocket
 	accumulatedText := ""
 	accumulatedThinking := ""
+	sentToolUseIDs := map[string]bool{}
 	var tokenUsage json.RawMessage
 
 	cliReadySent := false
@@ -291,7 +386,53 @@ func (h *WsHandler) handleMessage(session *WsSession, sessionKey string, msg map
 		subtype, _ := parsed["subtype"].(string)
 
 		switch {
+		case eventType == "stream_event":
+			inner, ok := parsed["event"].(map[string]interface{})
+			if !ok {
+				continue
+			}
+			innerType, _ := inner["type"].(string)
+
+			if innerType == "message_start" {
+				accumulatedText = ""
+				accumulatedThinking = ""
+			}
+
+			if innerType == "content_block_delta" {
+				delta, _ := inner["delta"].(map[string]interface{})
+				if delta == nil {
+					continue
+				}
+				deltaType, _ := delta["type"].(string)
+				switch deltaType {
+				case "text_delta":
+					text, _ := delta["text"].(string)
+					if text != "" {
+						accumulatedText += text
+						session.Send(map[string]interface{}{
+							"type":        "stream_token",
+							"memberID":    session.memberID,
+							"token":       text,
+							"accumulated": accumulatedText,
+						})
+					}
+				case "thinking_delta":
+					text, _ := delta["thinking"].(string)
+					if text != "" {
+						accumulatedThinking += text
+						session.Send(map[string]interface{}{
+							"type":        "thinking_token",
+							"memberID":    session.memberID,
+							"token":       text,
+							"accumulated": accumulatedThinking,
+						})
+					}
+				}
+			}
+
 		case eventType == "assistant":
+			// assistant 事件在 --print --include-partial-messages 下也會出現（累積內容）
+			// 只在 stream_event 尚未送過時才做 fallback
 			if msgContent, ok := parsed["message"].(map[string]interface{}); ok {
 				if contentArr, ok := msgContent["content"].([]interface{}); ok {
 					for _, block := range contentArr {
@@ -303,37 +444,46 @@ func (h *WsHandler) handleMessage(session *WsSession, sessionKey string, msg map
 						switch blockType {
 						case "text":
 							text, _ := blockMap["text"].(string)
-							accumulatedText += text
-							session.Send(map[string]interface{}{
-								"type":        "stream_token",
-								"memberID":    session.memberID,
-								"token":       text,
-								"accumulated": accumulatedText,
-							})
+							if text != "" && text != accumulatedText {
+								accumulatedText = text
+								session.Send(map[string]interface{}{
+									"type":        "stream_token",
+									"memberID":    session.memberID,
+									"token":       text,
+									"accumulated": accumulatedText,
+								})
+							}
 						case "thinking":
 							text, _ := blockMap["thinking"].(string)
-							accumulatedThinking += text
-							session.Send(map[string]interface{}{
-								"type":        "thinking_token",
-								"memberID":    session.memberID,
-								"token":       text,
-								"accumulated": accumulatedThinking,
-							})
-						case "tool_use":
-							inputJSON, _ := json.Marshal(blockMap["input"])
-							session.Send(map[string]interface{}{
-								"type":    "message",
-								"role":    "assistant",
-								"content": "",
-								"tool_calls": []map[string]interface{}{{
-									"id":   blockMap["id"],
-									"type": "function",
-									"function": map[string]interface{}{
-										"name":      blockMap["name"],
-										"arguments": string(inputJSON),
-									},
-								}},
-							})
+							if text != "" && text != accumulatedThinking {
+								accumulatedThinking = text
+								session.Send(map[string]interface{}{
+									"type":        "thinking_token",
+									"memberID":    session.memberID,
+									"token":       text,
+									"accumulated": accumulatedThinking,
+								})
+							}
+					case "tool_use":
+						toolID, _ := blockMap["id"].(string)
+						if toolID != "" && sentToolUseIDs[toolID] {
+							continue
+						}
+						sentToolUseIDs[toolID] = true
+						inputJSON, _ := json.Marshal(blockMap["input"])
+						session.Send(map[string]interface{}{
+							"type":    "message",
+							"role":    "assistant",
+							"content": "",
+							"tool_calls": []map[string]interface{}{{
+								"id":   toolID,
+								"type": "function",
+								"function": map[string]interface{}{
+									"name":      blockMap["name"],
+									"arguments": string(inputJSON),
+								},
+							}},
+						})
 						}
 					}
 				}
@@ -347,8 +497,37 @@ func (h *WsHandler) handleMessage(session *WsSession, sessionKey string, msg map
 				"tool_call_id": parsed["tool_use_id"],
 			})
 
+		case eventType == "user":
+			if msgContent, ok := parsed["message"].(map[string]interface{}); ok {
+				if contentArr, ok := msgContent["content"].([]interface{}); ok {
+					for _, block := range contentArr {
+						blockMap, ok := block.(map[string]interface{})
+						if !ok {
+							continue
+						}
+						if blockMap["type"] == "tool_result" {
+							session.Send(map[string]interface{}{
+								"type":         "message",
+								"role":         "tool",
+								"content":      blockMap["content"],
+								"tool_call_id": blockMap["tool_use_id"],
+							})
+						}
+					}
+				}
+			}
+
 		case eventType == "result" && subtype == "success":
-			// CLI result event contains: total_cost_usd, usage{input_tokens, output_tokens, ...}, modelUsage
+			if resultText, ok := parsed["result"].(string); ok && resultText != "" && accumulatedText == "" {
+				accumulatedText = resultText
+				session.Send(map[string]interface{}{
+					"type":        "stream_token",
+					"memberID":    session.memberID,
+					"token":       resultText,
+					"accumulated": accumulatedText,
+				})
+			}
+
 			usageData := map[string]interface{}{}
 			if cost, ok := parsed["total_cost_usd"]; ok {
 				usageData["total_cost_usd"] = cost
@@ -366,10 +545,8 @@ func (h *WsHandler) handleMessage(session *WsSession, sessionKey string, msg map
 				tokenUsage = b
 			}
 
-			// 即時扣款（同步，不是 fire-and-forget）
 			h.recordBilling(session.memberID, session.mode, session.sessionID, parsed)
 
-			// 每個 turn 結束後檢查餘額，不足就 kill CLI 中斷任務
 			if err := h.checkCredits(session.memberID); err != nil {
 				log.Printf("[WS] credits exhausted mid-task for %s, killing CLI", session.memberID)
 				session.mu.Lock()
@@ -382,7 +559,6 @@ func (h *WsHandler) handleMessage(session *WsSession, sessionKey string, msg map
 					"memberID": session.memberID,
 					"error":    err.Error(),
 				})
-				// eventCh will close because CLI was killed
 			}
 		}
 	}
@@ -422,10 +598,8 @@ func (h *WsHandler) handleMessage(session *WsSession, sessionKey string, msg map
 	go h.maybeGenerateTitle(session, messageText, accumulatedText)
 }
 
-// ensureCLI returns a live PersistentCLI for the session, starting one if needed.
-// If a previous CLI had a session ID, it rebuilds the .jsonl from DB and uses
-// --resume to restore conversation context.
-func (h *WsHandler) ensureCLI(session *WsSession) *executor.PersistentCLI {
+// ensureCLI 取得活著的 StreamCLI，死了就用 --resume 重啟
+func (h *WsHandler) ensureCLI(session *WsSession) *executor.StreamCLI {
 	session.mu.Lock()
 	cli := session.cli
 	session.mu.Unlock()
@@ -434,26 +608,17 @@ func (h *WsHandler) ensureCLI(session *WsSession) *executor.PersistentCLI {
 		return cli
 	}
 
-	// Capture session ID from old CLI before starting new one
 	session.mu.Lock()
 	if session.cli != nil {
-		if sid := session.cli.SessionID(); sid != "" {
-			session.cliSessionID = sid
-		}
 		session.cli.Kill()
 	}
-	resumeID := session.cliSessionID
 	session.mu.Unlock()
 
 	workDir := filepath.Join(h.vaultRoot, session.memberID)
 
-	// Rebuild .jsonl before resuming so CLI has the full conversation history
-	if resumeID != "" {
-		h.rebuildSessionJSONL(session, resumeID, workDir)
-	}
+	h.rebuildSessionJSONL(session, workDir)
 
-	// CLI not started or died — start synchronously (with resume if available)
-	newCLI, err := executor.NewPersistentCLI(workDir, "chat", session.memberID, resumeID, 5*time.Minute)
+	newCLI, err := executor.NewStreamCLI(workDir, "chat", session.memberID, session.sessionID, 5*time.Minute)
 	if err != nil {
 		log.Printf("[WS] CLI start failed for %s: %v", session.memberID, err)
 		return nil
@@ -468,7 +633,7 @@ func (h *WsHandler) ensureCLI(session *WsSession) *executor.PersistentCLI {
 
 // rebuildSessionJSONL queries chat messages from DB and writes the .jsonl file
 // so that CLI --resume can restore the conversation.
-func (h *WsHandler) rebuildSessionJSONL(session *WsSession, cliSessionID, workDir string) {
+func (h *WsHandler) rebuildSessionJSONL(session *WsSession, workDir string) {
 	msgs, _, err := h.chatStore.GetMessagesAfter(
 		context.Background(), session.sessionID, session.mode, "", 200)
 	if err != nil {
@@ -480,7 +645,6 @@ func (h *WsHandler) rebuildSessionJSONL(session *WsSession, cliSessionID, workDi
 		return
 	}
 
-	// Convert database.ChatMessage to executor.SessionMessage
 	smList := make([]executor.SessionMessage, 0, len(msgs))
 	for _, m := range msgs {
 		smList = append(smList, executor.SessionMessage{
@@ -494,10 +658,10 @@ func (h *WsHandler) rebuildSessionJSONL(session *WsSession, cliSessionID, workDi
 		})
 	}
 
-	if err := executor.RebuildSessionJSONL(cliSessionID, workDir, session.memberID, smList); err != nil {
+	if err := executor.RebuildSessionJSONL(session.sessionID, workDir, session.memberID, smList); err != nil {
 		log.Printf("[WS] rebuild JSONL error for session %s: %v", session.sessionID, err)
 	} else {
-		log.Printf("[WS] rebuilt JSONL for CLI session %s (%d messages)", cliSessionID, len(smList))
+		log.Printf("[WS] rebuilt JSONL for session %s (%d messages)", session.sessionID, len(smList))
 	}
 }
 
@@ -534,12 +698,11 @@ func (h *WsHandler) diffAndNotify(
 
 func (h *WsHandler) handleInterrupt(session *WsSession) {
 	session.mu.Lock()
-	taskID := session.taskID
+	if session.cli != nil {
+		session.cli.Kill()
+	}
 	session.mu.Unlock()
 
-	if taskID != "" {
-		h.executor.Cancel(taskID)
-	}
 	session.Send(map[string]interface{}{
 		"type":     "stream_interrupted",
 		"memberID": session.memberID,

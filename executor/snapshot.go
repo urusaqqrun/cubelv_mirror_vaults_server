@@ -15,7 +15,7 @@ func isSystemFile(relPath string) bool {
 	if relPath == "CLAUDE.md" {
 		return true
 	}
-	if strings.HasPrefix(relPath, ".NoteCEO/") {
+	if strings.HasPrefix(relPath, ".CubeLV/") {
 		return true
 	}
 	return false
