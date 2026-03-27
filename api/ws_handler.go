@@ -279,6 +279,11 @@ func (h *WsHandler) handleMessage(session *WsSession, sessionKey string, msg map
 			}
 			innerType, _ := inner["type"].(string)
 
+			if innerType == "message_start" {
+				accumulatedText = ""
+				accumulatedThinking = ""
+			}
+
 			if innerType == "content_block_delta" {
 				delta, _ := inner["delta"].(map[string]interface{})
 				if delta == nil {
@@ -377,6 +382,26 @@ func (h *WsHandler) handleMessage(session *WsSession, sessionKey string, msg map
 				"content":      parsed["content"],
 				"tool_call_id": parsed["tool_use_id"],
 			})
+
+		case eventType == "user":
+			if msgContent, ok := parsed["message"].(map[string]interface{}); ok {
+				if contentArr, ok := msgContent["content"].([]interface{}); ok {
+					for _, block := range contentArr {
+						blockMap, ok := block.(map[string]interface{})
+						if !ok {
+							continue
+						}
+						if blockMap["type"] == "tool_result" {
+							session.Send(map[string]interface{}{
+								"type":         "message",
+								"role":         "tool",
+								"content":      blockMap["content"],
+								"tool_call_id": blockMap["tool_use_id"],
+							})
+						}
+					}
+				}
+			}
 
 		case eventType == "result" && subtype == "success":
 			if resultText, ok := parsed["result"].(string); ok && resultText != "" && accumulatedText == "" {
