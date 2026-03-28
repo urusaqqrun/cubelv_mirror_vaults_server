@@ -449,19 +449,37 @@ func (s *StreamCLI) SessionID() string {
 	return s.sessionID
 }
 
-// cleanStaleSessionLock removes the session lock file left by a killed CLI process.
-// Claude CLI creates a lock at ~/.claude/projects/<encoded-workDir>/sessions/<sessionID>.lock
-// When the CLI is killed (idle timeout, server restart), the lock file persists on EFS
-// and blocks any future CLI startup with the same session ID.
+// cleanStaleSessionLock removes session lock files left by killed CLI processes.
+// Searches multiple possible lock locations used by Claude CLI.
 func cleanStaleSessionLock(workDir, sessionID string) {
-	encodedWorkDir := encodeProjectPath(workDir)
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return
 	}
-	lockPath := filepath.Join(homeDir, ".claude", "projects", encodedWorkDir, "sessions", sessionID+".lock")
-	if err := os.Remove(lockPath); err == nil {
-		log.Printf("[StreamCLI] cleaned stale lock file: %s", lockPath)
+	encodedWorkDir := encodeProjectPath(workDir)
+
+	// Possible lock file locations
+	candidates := []string{
+		filepath.Join(homeDir, ".claude", "projects", encodedWorkDir, "sessions", sessionID+".lock"),
+		filepath.Join(homeDir, ".claude", "sessions", sessionID+".lock"),
+		filepath.Join(workDir, ".claude", "sessions", sessionID+".lock"),
+	}
+
+	for _, path := range candidates {
+		if err := os.Remove(path); err == nil {
+			log.Printf("[StreamCLI] cleaned stale lock: %s", path)
+		}
+	}
+
+	// Also scan the project sessions dir for any .lock files and log them
+	sessionsDir := filepath.Join(homeDir, ".claude", "projects", encodedWorkDir, "sessions")
+	entries, err := os.ReadDir(sessionsDir)
+	if err == nil {
+		for _, e := range entries {
+			if strings.HasSuffix(e.Name(), ".lock") {
+				log.Printf("[StreamCLI] found lock file in sessions dir: %s", e.Name())
+			}
+		}
 	}
 }
 
