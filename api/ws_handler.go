@@ -956,7 +956,7 @@ func buildInstruction(messageText string, msgObj map[string]interface{}, pageCtx
 		}
 	}
 
-	// 2. attachedItems → 非圖片類展開為文字描述
+	// 2. attachedItems → 非圖片項目直接序列化為完整 JSON（保留所有欄位）
 	if msgObj != nil {
 		if items, ok := msgObj["attachedItems"].([]interface{}); ok {
 			for _, raw := range items {
@@ -968,13 +968,11 @@ func buildInstruction(messageText string, msgObj map[string]interface{}, pageCtx
 				if itemType == "image" {
 					continue // 圖片由 buildContentBlocks 處理
 				}
-				name, _ := item["name"].(string)
-				if name == "" {
-					name, _ = item["title"].(string)
+				// 直接將完整 item 序列化為 JSON，保留所有欄位（content、tags 等）
+				itemJSON, err := json.Marshal(item)
+				if err == nil {
+					parts = append(parts, fmt.Sprintf("\n[附加項目]\n%s", string(itemJSON)))
 				}
-				id, _ := item["id"].(string)
-				iType, _ := item["itemType"].(string)
-				parts = append(parts, fmt.Sprintf("\n[附加項目] 類型: %s, ID: %s, 名稱: %s", iType, id, name))
 			}
 		}
 	}
