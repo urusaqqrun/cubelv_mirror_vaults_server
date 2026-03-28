@@ -49,10 +49,13 @@ func TestItemToMirrorJSON_Roundtrip(t *testing.T) {
 	}
 }
 
-func TestMirrorJSONToItem_MissingID(t *testing.T) {
-	_, err := MirrorJSONToItem([]byte(`{"name":"test","itemType":"NOTE","fields":{}}`))
-	if err == nil {
-		t.Error("should error when id is missing")
+func TestMirrorJSONToItem_EmptyID_Allowed(t *testing.T) {
+	item, err := MirrorJSONToItem([]byte(`{"name":"test","itemType":"NOTE","fields":{}}`))
+	if err != nil {
+		t.Fatalf("empty id should be allowed for AI-created items, got error: %v", err)
+	}
+	if item.Name != "test" || item.ItemType != "NOTE" {
+		t.Errorf("unexpected result: %+v", item)
 	}
 }
 
