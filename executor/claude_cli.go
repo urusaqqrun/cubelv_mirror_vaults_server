@@ -9,7 +9,6 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -255,9 +254,7 @@ type StreamCLI struct {
 func NewStreamCLI(workDir, scope, userID, sessionID string, resume bool, idleTTL time.Duration) (*StreamCLI, error) {
 	funcStart := time.Now()
 
-	vaultClaudeMD := filepath.Join(workDir, "CLAUDE.md")
 	args := []string{
-		"--bare",
 		"--tools", "default",
 		"--print",
 		"--output-format", "stream-json",
@@ -266,8 +263,6 @@ func NewStreamCLI(workDir, scope, userID, sessionID string, resume bool, idleTTL
 		"--verbose",
 		"--dangerously-skip-permissions",
 		"--mcp-config", "/home/mirror/.claude/settings.json",
-		"--append-system-prompt-file", "/home/mirror/.claude/CLAUDE.md",
-		"--append-system-prompt-file", vaultClaudeMD,
 	}
 
 	if sessionID != "" {

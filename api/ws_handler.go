@@ -52,6 +52,12 @@ type SnapshotStore interface {
 	SnapshotExists(ctx context.Context, memberID string) (bool, error)
 }
 
+// cachedSnapshot 記憶體中快取的 snapshot（避免每句都查 DB）
+type cachedSnapshot struct {
+	snap  map[string]executor.FileSnapshot
+	idMap map[string]string
+}
+
 // WsHandler is the WebSocket endpoint handler.
 type WsHandler struct {
 	chatStore     ChatStore
@@ -60,6 +66,7 @@ type WsHandler struct {
 	vaultFS       mirror.VaultFS
 	sessions      sync.Map // sessionKey -> *WsSession
 	cliPool       sync.Map // memberID -> *executor.StreamCLI (warmup pool)
+	snapCache     sync.Map // memberID -> *cachedSnapshot
 }
 
 // NewWsHandler creates a new WsHandler.
@@ -635,46 +642,56 @@ func (h *WsHandler) handleMessage(session *WsSession, sessionKey string, msg map
 		"token_usage":    tokenUsage,
 	})
 
-	// 9. snapshot_after: 等待背景 snapshot_before 結果，再做增量掃描 + diff
-	snapBefore := <-snapCh
-	if snapBefore.err == nil {
-		snapAfterStart := time.Now()
-		afterSnap, afterIDMap, afterErr := executor.TakeIncrementalSnapshot(
-			h.vaultFS, session.memberID, snapBefore.snap, snapBefore.idMap,
-		)
-		if afterErr != nil {
-			log.Printf("[WS] incremental snapshot after error: %v", afterErr)
-		} else {
-			diff := executor.ComputeDiff(snapBefore.snap, afterSnap)
-			hasChanges := len(diff.Created)+len(diff.Modified)+len(diff.Deleted)+len(diff.Moved) > 0
-			log.Printf("[CacheProfile] snapshot_after INCREMENTAL+diff — %dms, changed=%v, +%d ~%d -%d mv%d",
-				time.Since(snapAfterStart).Milliseconds(), hasChanges,
-				len(diff.Created), len(diff.Modified), len(diff.Deleted), len(diff.Moved))
-
-			if hasChanges {
-				h.updateDBSnapshot(session.memberID, afterSnap, afterIDMap, diff)
-				session.Send(map[string]interface{}{
-					"type":     "vault_changed",
-					"memberID": session.memberID,
-				})
-			}
-		}
-	}
-
 	log.Printf("[CacheProfile] handleMessage DONE — total=%dms, member=%s",
 		time.Since(handleStart).Milliseconds(), session.memberID)
 
-	// 10. Generate session title (fire-and-forget)
-	go h.maybeGenerateTitle(session, messageText, accumulatedText)
+	// 9. snapshot_after + title：全部在背景執行，不阻塞下一次 handleMessage
+	go func() {
+		snapBefore := <-snapCh
+		if snapBefore.err == nil {
+			snapAfterStart := time.Now()
+			afterSnap, afterIDMap, afterErr := executor.TakeIncrementalSnapshot(
+				h.vaultFS, session.memberID, snapBefore.snap, snapBefore.idMap,
+			)
+			if afterErr != nil {
+				log.Printf("[WS] incremental snapshot after error: %v", afterErr)
+			} else {
+				diff := executor.ComputeDiff(snapBefore.snap, afterSnap)
+				hasChanges := len(diff.Created)+len(diff.Modified)+len(diff.Deleted)+len(diff.Moved) > 0
+				log.Printf("[CacheProfile] snapshot_after INCREMENTAL+diff — %dms, changed=%v, +%d ~%d -%d mv%d",
+					time.Since(snapAfterStart).Milliseconds(), hasChanges,
+					len(diff.Created), len(diff.Modified), len(diff.Deleted), len(diff.Moved))
+
+				if hasChanges {
+					h.updateDBSnapshot(session.memberID, afterSnap, afterIDMap, diff)
+					session.Send(map[string]interface{}{
+						"type":     "vault_changed",
+						"memberID": session.memberID,
+					})
+				}
+				h.snapCache.Store(session.memberID, &cachedSnapshot{snap: afterSnap, idMap: afterIDMap})
+			}
+		}
+
+		// 10. Generate session title (fire-and-forget)
+		h.maybeGenerateTitle(session, messageText, accumulatedText)
+	}()
 }
 
-// loadBeforeSnapshot reads the snapshot from DB. Falls back to full EFS scan
-// if no DB record exists (first use), and stores the result to DB.
+// loadBeforeSnapshot 先查記憶體 cache，cache miss 再查 DB，DB 也沒有才做完整 EFS scan。
 func (h *WsHandler) loadBeforeSnapshot(memberID string) (map[string]executor.FileSnapshot, map[string]string, error) {
+	if cached, ok := h.snapCache.Load(memberID); ok {
+		cs := cached.(*cachedSnapshot)
+		log.Printf("[CacheProfile] snapshot_before HIT memcache, files=%d", len(cs.snap))
+		return cs.snap, cs.idMap, nil
+	}
+
 	ctx := context.Background()
 	rows, err := h.snapshotStore.GetSnapshot(ctx, memberID)
 	if err == nil && len(rows) > 0 {
 		snap, idMap := dbRowsToSnapshot(rows)
+		h.snapCache.Store(memberID, &cachedSnapshot{snap: snap, idMap: idMap})
+		log.Printf("[CacheProfile] snapshot_before from DB, cached, files=%d", len(snap))
 		return snap, idMap, nil
 	}
 
@@ -688,6 +705,7 @@ func (h *WsHandler) loadBeforeSnapshot(memberID string) (map[string]executor.Fil
 	if storeErr := h.snapshotStore.ReplaceSnapshot(ctx, memberID, dbRows); storeErr != nil {
 		log.Printf("[WS] DB snapshot initial store failed for %s: %v", memberID, storeErr)
 	}
+	h.snapCache.Store(memberID, &cachedSnapshot{snap: snap, idMap: idMap})
 	return snap, idMap, nil
 }
 
