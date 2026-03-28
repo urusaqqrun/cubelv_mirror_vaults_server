@@ -1062,22 +1062,8 @@ func buildInstruction(messageText string, msgObj map[string]interface{}, pageCtx
 	var parts []string
 	parts = append(parts, messageText)
 
-	// 1. pageContext → 告訴 AI 用戶當前在看什麼
-	if pageCtx != nil {
-		if folder, ok := pageCtx["folder"].(map[string]interface{}); ok {
-			pageID, _ := folder["pageId"].(string)
-			pageName, _ := folder["pageName"].(string)
-			pageType, _ := folder["pageType"].(string)
-			parts = append(parts, fmt.Sprintf("\n[目前所在資料夾] ID: %s, 名稱: %s, 類型: %s", pageID, pageName, pageType))
-		}
-		if item, ok := pageCtx["item"].(map[string]interface{}); ok {
-			pageID, _ := item["pageId"].(string)
-			pageName, _ := item["pageName"].(string)
-			parts = append(parts, fmt.Sprintf("\n[目前選取項目] ID: %s, 名稱: %s", pageID, pageName))
-		}
-	}
-
-	// 2. attachedItems → 非圖片項目直接序列化為完整 JSON（保留所有欄位）
+	// 收集附加項目（非圖片）
+	var attachedParts []string
 	if msgObj != nil {
 		if items, ok := msgObj["attachedItems"].([]interface{}); ok {
 			for _, raw := range items {
@@ -1089,12 +1075,29 @@ func buildInstruction(messageText string, msgObj map[string]interface{}, pageCtx
 				if itemType == "image" {
 					continue // 圖片由 buildContentBlocks 處理
 				}
-				// 直接將完整 item 序列化為 JSON，保留所有欄位（content、tags 等）
 				itemJSON, err := json.Marshal(item)
 				if err == nil {
-					parts = append(parts, fmt.Sprintf("\n[附加項目]\n%s", string(itemJSON)))
+					attachedParts = append(attachedParts, fmt.Sprintf("\n[附加項目]\n%s", string(itemJSON)))
 				}
 			}
+		}
+	}
+
+	// 有附加項目時不加 pageContext（附加項目本身就是上下文，避免混淆）
+	if len(attachedParts) > 0 {
+		parts = append(parts, attachedParts...)
+	} else if pageCtx != nil {
+		// 無附加項目時才加 pageContext（資料夾 + 選取項目）
+		if folder, ok := pageCtx["folder"].(map[string]interface{}); ok {
+			pageID, _ := folder["pageId"].(string)
+			pageName, _ := folder["pageName"].(string)
+			pageType, _ := folder["pageType"].(string)
+			parts = append(parts, fmt.Sprintf("\n[目前所在資料夾] ID: %s, 名稱: %s, 類型: %s", pageID, pageName, pageType))
+		}
+		if item, ok := pageCtx["item"].(map[string]interface{}); ok {
+			pageID, _ := item["pageId"].(string)
+			pageName, _ := item["pageName"].(string)
+			parts = append(parts, fmt.Sprintf("\n[目前選取項目] ID: %s, 名稱: %s", pageID, pageName))
 		}
 	}
 
