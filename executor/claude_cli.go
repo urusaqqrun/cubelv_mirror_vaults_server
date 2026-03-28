@@ -261,6 +261,11 @@ func NewStreamCLI(workDir, scope, userID, sessionID, model string, resume bool, 
 		cleanStaleSessionLock(workDir, sessionID)
 	}
 
+	// 診斷：計算當前正在跑的 claude process 數量
+	if out, err := exec.Command("pgrep", "-c", "claude").Output(); err == nil {
+		log.Printf("[StreamCLI-diag] current claude process count: %s", strings.TrimSpace(string(out)))
+	}
+
 	args := []string{
 		"--print",
 		"--output-format", "stream-json",
