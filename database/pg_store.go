@@ -227,28 +227,8 @@ func (s *PgStore) DeleteDocument(ctx context.Context, userID, collection, docID 
 }
 
 // ---------------------------------------------------------------------------
-// USNReader 介面（衝突判定用）
 // ---------------------------------------------------------------------------
-
-func (s *PgStore) GetDocUSN(ctx context.Context, userID, collection, docID string) (int, error) {
-	var version int
-	err := s.db.QueryRowContext(ctx,
-		`SELECT bi.version FROM base_items bi
-		 JOIN item_permissions ip ON ip.item_id = bi.id AND ip.permission = 'owner'
-		 WHERE bi.id = $1 AND ip.user_id = $2 AND bi.deleted_at IS NULL`,
-		docID, userID,
-	).Scan(&version)
-	if err == sql.ErrNoRows {
-		return -1, nil
-	}
-	if err != nil {
-		return 0, err
-	}
-	return version, nil
-}
-
-// ---------------------------------------------------------------------------
-// USNIncrementer 介面（版本號遞增）
+// IncrementUSN（版本號遞增）
 // 使用 Redis INCR 維持與 golang_service 相容的 usn:{ownerID} key
 // ---------------------------------------------------------------------------
 
@@ -266,9 +246,9 @@ var initAndIncrUSN = redis.NewScript(`
 	return redis.call("INCR", KEYS[1])
 `)
 
-func (s *PgStore) IncrementUSN(ctx context.Context, userID string) (int, error) {
+func (s *PgStore) IncrementVersion(ctx context.Context, userID string) (int, error) {
 	if s.rdb == nil {
-		return s.incrementUSNViaPG(ctx, userID)
+		return s.incrementVersionViaPG(ctx, userID)
 	}
 
 	key := "usn:" + userID
@@ -282,18 +262,18 @@ func (s *PgStore) IncrementUSN(ctx context.Context, userID string) (int, error) 
 	}
 
 	// 慢路徑：key 不存在，從 PG base_items 取基準 version
-	baseUSN := s.getMaxVersionFromPG(ctx, userID)
+	baseVersion := s.getMaxVersionFromPG(ctx, userID)
 
-	newUSN, err := initAndIncrUSN.Run(ctx, s.rdb, []string{key}, baseUSN).Int64()
+	newVersion, err := initAndIncrUSN.Run(ctx, s.rdb, []string{key}, baseVersion).Int64()
 	if err != nil {
 		log.Printf("[PgStore] Redis Lua INCR 失敗，fallback PG: %v", err)
-		return s.incrementUSNViaPG(ctx, userID)
+		return s.incrementVersionViaPG(ctx, userID)
 	}
 
 	if sErr := s.rdb.SAdd(ctx, "usn:dirty", userID).Err(); sErr != nil {
 		log.Printf("[PgStore] SAdd usn:dirty 失敗: %v", sErr)
 	}
-	return int(newUSN), nil
+	return int(newVersion), nil
 }
 
 func (s *PgStore) getMaxVersionFromPG(ctx context.Context, userID string) int {
@@ -310,11 +290,10 @@ func (s *PgStore) getMaxVersionFromPG(ctx context.Context, userID string) int {
 	return int(maxVer.Int64)
 }
 
-func (s *PgStore) incrementUSNViaPG(ctx context.Context, userID string) (int, error) {
-	// 使用 pg_advisory_xact_lock 確保同一用戶的 USN 遞增是原子的
+func (s *PgStore) incrementVersionViaPG(ctx context.Context, userID string) (int, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, fmt.Errorf("begin tx for USN incr: %w", err)
+		return 0, fmt.Errorf("begin tx for version incr: %w", err)
 	}
 	defer tx.Rollback()
 
@@ -342,16 +321,12 @@ func (s *PgStore) incrementUSNViaPG(ctx context.Context, userID string) (int, er
 	}
 
 	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("commit USN incr tx: %w", err)
+		return 0, fmt.Errorf("commit version incr tx: %w", err)
 	}
 	return newVer, nil
 }
 
-// ---------------------------------------------------------------------------
-// USNSyncer 介面（PostgreSQL 模式不需要額外同步，no-op）
-// ---------------------------------------------------------------------------
-
-func (s *PgStore) SyncUserUSN(ctx context.Context, userID string) error {
+func (s *PgStore) SyncUserVersion(ctx context.Context, userID string) error {
 	return nil
 }
 
@@ -359,7 +334,7 @@ func (s *PgStore) SyncUserUSN(ctx context.Context, userID string) error {
 // latestUSNReader 介面（AI 任務開始前的基準版本號）
 // ---------------------------------------------------------------------------
 
-func (s *PgStore) GetLatestUSN(ctx context.Context, userID string) (int, error) {
+func (s *PgStore) GetLatestVersion(ctx context.Context, userID string) (int, error) {
 	var maxVer sql.NullInt64
 	err := s.db.QueryRowContext(ctx,
 		`SELECT COALESCE(MAX(bi.version), 0) FROM base_items bi
@@ -368,7 +343,7 @@ func (s *PgStore) GetLatestUSN(ctx context.Context, userID string) (int, error) 
 		userID,
 	).Scan(&maxVer)
 	if err != nil {
-		return 0, fmt.Errorf("get latest USN: %w", err)
+		return 0, fmt.Errorf("get latest version: %w", err)
 	}
 	if !maxVer.Valid {
 		return 0, nil

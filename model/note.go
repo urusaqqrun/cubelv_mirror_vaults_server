@@ -11,7 +11,7 @@ type Note struct {
 	CreateAt  int64    `bson:"createAt"`
 	UpdateAt  int64    `bson:"updateAt"`
 	OrderAt   *string  `bson:"orderAt,omitempty"`
-	Usn       int      `bson:"usn"`
+	Version   int      `bson:"usn"`
 	Status    *string  `bson:"status,omitempty"`
 	AiTitle   *string  `bson:"aiTitle,omitempty"`
 	AiTags    []string `bson:"aiTags,omitempty"`

@@ -13,5 +13,5 @@ type Card struct {
 	IsDeleted     bool    `json:"isDeleted" bson:"isDeleted"`
 	CreatedAt     string  `json:"createdAt" bson:"createdAt"`
 	UpdatedAt     string  `json:"updatedAt" bson:"updatedAt"`
-	Usn           int     `json:"usn" bson:"usn"`
+	Version       int     `json:"usn" bson:"usn"`
 }

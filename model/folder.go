@@ -10,7 +10,7 @@ type Folder struct {
 	Icon       *string `bson:"icon,omitempty"`
 	CreatedAt  string  `bson:"createdAt"`
 	UpdatedAt  string  `bson:"updatedAt"`
-	Usn        int     `bson:"usn"`
+	Version    int     `bson:"usn"`
 	NoteNum    int64   `bson:"noteNum"`
 	IsTemp     bool    `bson:"isTemp"`
 

@@ -23,6 +23,6 @@ func (p *VaultChangeProcessor) ProcessChange(ctx context.Context, change ChangeR
 		DocID:      change.ItemID,
 		Action:     action,
 		Timestamp:  change.CreatedAt,
-		USN:        change.Seq,
+		Version:    change.Seq,
 	})
 }

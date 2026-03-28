@@ -250,12 +250,12 @@ type StreamCLI struct {
 	CacheBuilt bool // true after first message builds Anthropic prompt cache
 }
 
-// NewStreamCLI 啟動帶有 streaming 功能的長駐 CLI
-func NewStreamCLI(workDir, scope, userID, sessionID string, resume bool, idleTTL time.Duration) (*StreamCLI, error) {
+// NewStreamCLI 啟動帶有 streaming 功能的長駐 CLI。
+// model 若非空，會傳 --model 給 claude CLI 以指定使用的模型。
+func NewStreamCLI(workDir, scope, userID, sessionID, model string, resume bool, idleTTL time.Duration) (*StreamCLI, error) {
 	funcStart := time.Now()
 
 	args := []string{
-		"--tools", "default",
 		"--print",
 		"--output-format", "stream-json",
 		"--include-partial-messages",
@@ -263,6 +263,10 @@ func NewStreamCLI(workDir, scope, userID, sessionID string, resume bool, idleTTL
 		"--verbose",
 		"--dangerously-skip-permissions",
 		"--mcp-config", "/home/mirror/.claude/settings.json",
+	}
+
+	if model != "" {
+		args = append(args, "--model", model)
 	}
 
 	if sessionID != "" {

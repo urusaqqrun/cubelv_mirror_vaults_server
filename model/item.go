@@ -27,7 +27,7 @@ func FolderSubType(itemType string) string {
 	return strings.TrimSuffix(itemType, "_FOLDER")
 }
 
-func (i *Item) GetUSN() int {
+func (i *Item) GetVersion() int {
 	return intField(i.Fields, "usn")
 }
 
