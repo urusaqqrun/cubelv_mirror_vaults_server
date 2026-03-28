@@ -16,7 +16,7 @@ type mockWriter struct {
 
 	upsertItemDocs []Doc
 	deleteItemIDs  []string
-	nextUSN        int
+	nextVersion    int
 }
 
 func (m *mockWriter) UpsertItem(_ context.Context, _ string, doc Doc) error {
@@ -33,11 +33,11 @@ func (m *mockWriter) DeleteItemDoc(_ context.Context, _ string, docID string, _ 
 	return nil
 }
 
-func (m *mockWriter) IncrementUSN(_ context.Context, _ string) (int, error) {
+func (m *mockWriter) IncrementVersion(_ context.Context, _ string) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.nextUSN++
-	return m.nextUSN, nil
+	m.nextVersion++
+	return m.nextVersion, nil
 }
 
 func cloneDoc(doc Doc) Doc {

@@ -9,7 +9,7 @@ type SyncEvent struct {
 	DocID      string
 	Action     string
 	Timestamp  int64
-	USN        int
+	Version    int
 }
 
 // EventHandler 是事件投影器的最小介面。

@@ -89,7 +89,7 @@ func TestEventPipeline_FolderUpdate_ExportsSiblingJSON(t *testing.T) {
 	noteType := "NOTE"
 	reader := &mockDataReader{
 		folders: map[string]*model.Folder{
-			"f1": {ID: "f1", FolderName: "工作", Type: &noteType, Usn: 2},
+			"f1": {ID: "f1", FolderName: "工作", Type: &noteType, Version: 2},
 		},
 		items: map[string]*model.Item{
 			"f1": {ID: "f1", Name: "工作", Type: "NOTE_FOLDER", Fields: map[string]interface{}{}},
@@ -111,7 +111,7 @@ func TestEventPipeline_NoteCreate_ExportsJSON(t *testing.T) {
 	content := "<p>Hello</p>"
 	reader := &mockDataReader{
 		notes: map[string]*model.Note{
-			"n1": {ID: "n1", Title: &title, Content: &content, ParentID: "f1", Usn: 3, CreateAt: 1, UpdateAt: 2},
+			"n1": {ID: "n1", Title: &title, Content: &content, ParentID: "f1", Version: 3, CreateAt: 1, UpdateAt: 2},
 		},
 		items: map[string]*model.Item{
 			"f1": {ID: "f1", Name: "工作", Type: "NOTE_FOLDER", Fields: map[string]interface{}{}},

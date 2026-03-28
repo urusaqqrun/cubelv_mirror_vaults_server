@@ -21,7 +21,7 @@ type Doc = map[string]interface{}
 type DataWriter interface {
 	UpsertItem(ctx context.Context, userID string, doc Doc) error
 	DeleteItemDoc(ctx context.Context, userID, docID string, version int) error
-	IncrementUSN(ctx context.Context, userID string) (int, error)
+	IncrementVersion(ctx context.Context, userID string) (int, error)
 }
 
 // WriteBackResult 回寫統計
@@ -47,9 +47,9 @@ func WriteBack(ctx context.Context, writer DataWriter, userID string, entries []
 				return nil
 			}
 
-			version, vErr := writer.IncrementUSN(gCtx, userID)
+			version, vErr := writer.IncrementVersion(gCtx, userID)
 			if vErr != nil {
-				log.Printf("[WriteBack] IncrementUSN error: %v", vErr)
+				log.Printf("[WriteBack] IncrementVersion error: %v", vErr)
 				atomic.AddInt64(&errors, 1)
 				return nil
 			}
@@ -104,15 +104,15 @@ func resolveDocID(e mirror.ImportEntry) string {
 }
 
 // upsertEntry 統一走 upsertItemEntry，不分 collection
-func upsertEntry(ctx context.Context, w DataWriter, userID string, e mirror.ImportEntry, newUSN int) error {
-	return upsertItemEntry(ctx, w, userID, e, newUSN)
+func upsertEntry(ctx context.Context, w DataWriter, userID string, e mirror.ImportEntry, newVersion int) error {
+	return upsertItemEntry(ctx, w, userID, e, newVersion)
 }
 
-func upsertItemEntry(ctx context.Context, w DataWriter, userID string, e mirror.ImportEntry, newUSN int) error {
+func upsertItemEntry(ctx context.Context, w DataWriter, userID string, e mirror.ImportEntry, newVersion int) error {
 	if e.ItemData == nil {
 		return fmt.Errorf("item entry has no ItemData")
 	}
-	doc := itemDataToItemDoc(e.ItemData, newUSN)
+	doc := itemDataToItemDoc(e.ItemData, newVersion)
 	ensureDocID(doc, e.Action)
 	return w.UpsertItem(ctx, userID, doc)
 }
