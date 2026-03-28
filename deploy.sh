@@ -78,8 +78,8 @@ REPO_EXISTS=$(aws ecr describe-repositories \
 
 if [ "$REPO_EXISTS" != "$ECR_REPOSITORY" ]; then
   echo "ECR 存儲庫 $ECR_REPOSITORY 不存在，正在創建..."
-  aws ecr create-repository --repository-name "$ECR_REPOSITORY" --region "$AWS_REGION"
-  echo "✅ ECR 存儲庫創建完成"
+  aws ecr create-repository --repository-name "$ECR_REPOSITORY" --region "$AWS_REGION" || true
+  echo "✅ ECR 存儲庫創建完成（或已存在）"
 else
   echo "✅ ECR 存儲庫 $ECR_REPOSITORY 已存在"
 fi
