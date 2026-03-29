@@ -1304,29 +1304,36 @@ func (h *WsHandler) checkCredits(memberID string) error {
 		mcURL = "http://membercenter.svc.local:3006"
 	}
 
-	reqBody, _ := json.Marshal(map[string]string{"memberId": memberID})
-	resp, err := http.Post(mcURL+"/api/internal/quota/ai/check", "application/json", bytes.NewReader(reqBody))
+	// 查詢 credits 餘額（與 AI prompt server 一致）
+	balanceURL := fmt.Sprintf("%s/api/internal/credits/balance/%s", mcURL, memberID)
+	resp, err := http.Get(balanceURL)
 	if err != nil {
-		log.Printf("[WS] credits check failed (allowing): %v", err)
-		return nil
+		log.Printf("[WS] credits balance check failed: %v", err)
+		return fmt.Errorf("CREDITS_CHECK_FAILED: 無法驗證額度")
 	}
 	defer resp.Body.Close()
 
 	var result struct {
 		Success bool `json:"success"`
 		Data    struct {
-			Allowed bool    `json:"allowed"`
-			Reason  string  `json:"reason"`
-			Balance float64 `json:"balance"`
+			TotalCredits float64 `json:"totalCredits"`
 		} `json:"data"`
 	}
-	if json.NewDecoder(resp.Body).Decode(&result) != nil {
-		return nil
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		log.Printf("[WS] credits balance decode failed: %v", err)
+		return fmt.Errorf("CREDITS_CHECK_FAILED: 無法解析額度資訊")
 	}
 
-	if result.Success && result.Data.Allowed == false {
-		return fmt.Errorf("INSUFFICIENT_CREDITS: 額度不足 (餘額: %.2f)", result.Data.Balance)
+	if !result.Success {
+		log.Printf("[WS] credits balance query not successful for %s", memberID)
+		return fmt.Errorf("CREDITS_CHECK_FAILED: 額度查詢失敗")
 	}
+
+	if result.Data.TotalCredits <= 0 {
+		log.Printf("[WS] insufficient credits for %s: %.2f", memberID, result.Data.TotalCredits)
+		return fmt.Errorf("INSUFFICIENT_CREDITS: Credits 不足，當前餘額: %.2f", result.Data.TotalCredits)
+	}
+
 	return nil
 }
 
