@@ -78,6 +78,9 @@ elif echo "$NORMALIZED_COMMAND" | grep -qE '(^|[[:space:];|&])mv([[:space:]]|$)'
 elif echo "$NORMALIZED_COMMAND" | grep -qE '(>|>>|(^|[[:space:];|&])(cp|mkdir|touch|install|tee|chmod|chown|ln|sed[[:space:]]+-i|perl[[:space:]]+-pi)([[:space:]]|$))'; then
   IS_WRITE_COMMAND=true
   BASH_ACTION="write"
+elif echo "$NORMALIZED_COMMAND" | grep -qE '(^|[[:space:];|&])(python3?|node|ruby|php)[[:space:]]'; then
+  IS_WRITE_COMMAND=true
+  BASH_ACTION="write"
 fi
 
 # 規則 3：Bash 只能存取當前工作目錄或 shared（shared 僅允許讀取）
