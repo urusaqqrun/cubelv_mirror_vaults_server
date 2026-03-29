@@ -3,6 +3,7 @@ package executor
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -192,6 +193,23 @@ func RebuildSessionJSONL(sessionID, workDir, memberID string, messages []Session
 
 	content := strings.Join(lines, "\n") + "\n"
 	return os.WriteFile(filePath, []byte(content), 0644)
+}
+
+// CleanupSessionJSONL removes the JSONL file for a session so that
+// --session-id won't conflict with an existing session on disk.
+func CleanupSessionJSONL(sessionID, workDir string) {
+	if sessionID == "" {
+		return
+	}
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	encoded := encodeProjectPath(workDir)
+	jsonlPath := filepath.Join(homeDir, ".claude", "projects", encoded, sessionID+".jsonl")
+	if err := os.Remove(jsonlPath); err == nil {
+		log.Printf("[SessionCleanup] removed stale JSONL: %s", jsonlPath)
+	}
 }
 
 // encodeProjectPath produces the directory name Claude CLI uses for a project.

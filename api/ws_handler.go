@@ -214,6 +214,9 @@ func (h *WsHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 				}
 				log.Printf("[WS] warmup model mismatch (pool=%s, req=%s), creating new CLI", wc.model, model)
 			}
+			if sessionID != "" {
+				executor.CleanupSessionJSONL(sessionID, workDir)
+			}
 			cli, err := executor.NewStreamCLI(workDir, "chat", memberID, sessionID, model, false, 5*time.Minute)
 			if err != nil {
 				log.Printf("[WS] CLI start failed for %s: %v", memberID, err)
@@ -270,6 +273,9 @@ func (h *WsHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		if sessionID != "" {
+			executor.CleanupSessionJSONL(sessionID, workDir)
+		}
 		cli, err := executor.NewStreamCLI(workDir, "chat", memberID, sessionID, model, false, 5*time.Minute)
 		if err != nil {
 			log.Printf("[WS] CLI start failed for %s: %v", memberID, err)
