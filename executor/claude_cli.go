@@ -412,7 +412,7 @@ func (s *StreamCLI) SendMessage(content interface{}) (<-chan StreamEvent, error)
 		return nil, fmt.Errorf("CLI process not alive")
 	}
 
-	s.resetIdleTimer()
+	s.stopIdleTimer()
 
 	// 根據 content 類型構建 message
 	var msgContent interface{}
@@ -442,13 +442,15 @@ func (s *StreamCLI) SendMessage(content interface{}) (<-chan StreamEvent, error)
 
 	ch := make(chan StreamEvent, 128)
 	go func() {
-		defer close(ch)
+		defer func() {
+			s.resetIdleTimer()
+			close(ch)
+		}()
 		for s.stdout.Scan() {
 			line := s.stdout.Text()
 			if line == "" {
 				continue
 			}
-			s.resetIdleTimer()
 			ch <- StreamEvent{Type: "stdout", Data: line}
 
 			var parsed map[string]interface{}
@@ -546,6 +548,15 @@ func cleanStaleSessionLock(workDir, sessionID string) {
 				log.Printf("[StreamCLI] found lock file in sessions dir: %s", e.Name())
 			}
 		}
+	}
+}
+
+func (s *StreamCLI) stopIdleTimer() {
+	s.timerMu.Lock()
+	defer s.timerMu.Unlock()
+	if s.idleTimer != nil {
+		s.idleTimer.Stop()
+		s.idleTimer = nil
 	}
 }
 
