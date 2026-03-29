@@ -304,6 +304,7 @@ type StreamCLI struct {
 	stdin     io.WriteCloser
 	stdout    *bufio.Scanner
 	mu        sync.Mutex
+	timerMu   sync.Mutex // 專門保護 idleTimer，避免 stdout goroutine 與 Kill/SendMessage 競爭
 	workDir    string
 	sessionID  string
 	alive      bool
@@ -411,7 +412,7 @@ func (s *StreamCLI) SendMessage(content interface{}) (<-chan StreamEvent, error)
 		return nil, fmt.Errorf("CLI process not alive")
 	}
 
-	s.resetIdleTimer()
+	s.stopIdleTimer()
 
 	// 根據 content 類型構建 message
 	var msgContent interface{}
@@ -441,7 +442,10 @@ func (s *StreamCLI) SendMessage(content interface{}) (<-chan StreamEvent, error)
 
 	ch := make(chan StreamEvent, 128)
 	go func() {
-		defer close(ch)
+		defer func() {
+			s.resetIdleTimer()
+			close(ch)
+		}()
 		for s.stdout.Scan() {
 			line := s.stdout.Text()
 			if line == "" {
@@ -495,11 +499,14 @@ func (s *StreamCLI) Interrupt() bool {
 }
 
 func (s *StreamCLI) Kill() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.timerMu.Lock()
 	if s.idleTimer != nil {
 		s.idleTimer.Stop()
 	}
+	s.timerMu.Unlock()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.alive && s.cmd.Process != nil {
 		log.Printf("[StreamCLI] killing pid=%d", s.cmd.Process.Pid)
 		_ = s.cmd.Process.Kill()
@@ -561,7 +568,18 @@ func cleanStaleSessionLock(workDir, sessionID string) {
 	}
 }
 
+func (s *StreamCLI) stopIdleTimer() {
+	s.timerMu.Lock()
+	defer s.timerMu.Unlock()
+	if s.idleTimer != nil {
+		s.idleTimer.Stop()
+		s.idleTimer = nil
+	}
+}
+
 func (s *StreamCLI) resetIdleTimer() {
+	s.timerMu.Lock()
+	defer s.timerMu.Unlock()
 	if s.idleTimer != nil {
 		s.idleTimer.Stop()
 	}
