@@ -5,86 +5,176 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"io"
+	"io/fs"
 	"log"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
-// bwrapAvailable 表示 bubblewrap 沙箱是否可用（在 init 時偵測）
-var bwrapAvailable bool
+// UID 隔離相關變數
+var (
+	uidIsolationAvailable bool
+	mirrorUID             uint64
+	mirrorGID             uint64
+	vaultPermOnce         sync.Map // workDir → bool：追蹤已設定權限的 vault
+)
 
 func init() {
-	bwrapPath, err := exec.LookPath("bwrap")
-	if err != nil {
-		log.Printf("[Sandbox] bwrap not found, filesystem sandboxing disabled")
+	// 查找 mirror user 的 UID/GID（root 環境下用於保底）
+	if u, err := user.Lookup("mirror"); err == nil {
+		mirrorUID, _ = strconv.ParseUint(u.Uid, 10, 32)
+		mirrorGID, _ = strconv.ParseUint(u.Gid, 10, 32)
+	}
+
+	if os.Getuid() != 0 {
+		log.Printf("[Sandbox] not running as root, UID isolation disabled")
 		return
 	}
-	testCmd := exec.Command(bwrapPath, "--bind", "/", "/", "--", "/bin/echo", "bwrap-test")
-	output, err := testCmd.CombinedOutput()
-	if err != nil {
-		log.Printf("[Sandbox] bwrap not functional (namespace restriction?): %v — %s", err, strings.TrimSpace(string(output)))
+
+	if testUIDIsolation() {
+		uidIsolationAvailable = true
+		log.Printf("[Sandbox] UID isolation available — per-member filesystem permissions enabled")
 	} else {
-		bwrapAvailable = true
-		log.Printf("[Sandbox] bwrap available — filesystem sandboxing enabled")
+		log.Printf("[Sandbox] UID isolation NOT effective (EFS may override UID), using mirror user fallback")
 	}
 }
 
-// buildBwrapArgs 產生 bwrap 沙箱參數：隱藏 /vaults/，只暴露當前用戶 vault + shared
-func buildBwrapArgs(vaultRoot, userID, workDir string) []string {
-	vaultDir := filepath.Join(vaultRoot, userID)
-	sharedDir := filepath.Join(vaultRoot, "shared")
-
-	args := []string{
-		"--bind", "/", "/",
-		"--tmpfs", vaultRoot,
-		"--bind", vaultDir, vaultDir,
-	}
-	if _, err := os.Stat(sharedDir); err == nil {
-		args = append(args, "--ro-bind", sharedDir, sharedDir)
-	}
-	args = append(args, "--chdir", workDir)
-	return args
-}
-
-// newClaudeCmd 建立 claude CLI 指令，在 bwrap 可用時自動包裝沙箱
-func newClaudeCmd(ctx context.Context, workDir, scope, userID string, claudeArgs []string) *exec.Cmd {
+// testUIDIsolation 在 /vaults/ 建立臨時目錄測試 chown + setuid 是否真正隔離
+func testUIDIsolation() bool {
 	vaultRoot := os.Getenv("VAULT_ROOT")
 	if vaultRoot == "" {
 		vaultRoot = "/vaults"
 	}
 
-	var cmd *exec.Cmd
+	testDir := filepath.Join(vaultRoot, fmt.Sprintf(".uid-test-%d", time.Now().UnixNano()))
+	defer os.RemoveAll(testDir)
 
-	if bwrapAvailable {
-		bwrapPath, _ := exec.LookPath("bwrap")
-		claudePath, _ := exec.LookPath("claude")
-		bwrapArgs := buildBwrapArgs(vaultRoot, userID, workDir)
-		fullArgs := append(bwrapArgs, "--", claudePath)
-		fullArgs = append(fullArgs, claudeArgs...)
-		if ctx != nil {
-			cmd = exec.CommandContext(ctx, bwrapPath, fullArgs...)
-		} else {
-			cmd = exec.Command(bwrapPath, fullArgs...)
-		}
-	} else {
-		if ctx != nil {
-			cmd = exec.CommandContext(ctx, "claude", claudeArgs...)
-		} else {
-			cmd = exec.Command("claude", claudeArgs...)
-		}
-		cmd.Dir = workDir
+	ownerUID, otherUID := uint32(12345), uint32(54321)
+
+	if err := os.MkdirAll(testDir, 0700); err != nil {
+		log.Printf("[Sandbox] UID test: mkdir failed: %v", err)
+		return false
+	}
+	if err := os.Chown(testDir, int(ownerUID), int(ownerUID)); err != nil {
+		log.Printf("[Sandbox] UID test: chown failed: %v", err)
+		return false
 	}
 
+	testFile := filepath.Join(testDir, "test")
+	if err := os.WriteFile(testFile, []byte("test"), 0600); err != nil {
+		log.Printf("[Sandbox] UID test: write failed: %v", err)
+		return false
+	}
+	os.Chown(testFile, int(ownerUID), int(ownerUID))
+
+	// owner UID 應可存取
+	cmd1 := exec.Command("cat", testFile)
+	cmd1.SysProcAttr = &syscall.SysProcAttr{
+		Credential: &syscall.Credential{Uid: ownerUID, Gid: ownerUID},
+	}
+	if _, err := cmd1.CombinedOutput(); err != nil {
+		log.Printf("[Sandbox] UID test: owner access failed: %v", err)
+		return false
+	}
+
+	// 其他 UID 應被拒絕
+	cmd2 := exec.Command("cat", testFile)
+	cmd2.SysProcAttr = &syscall.SysProcAttr{
+		Credential: &syscall.Credential{Uid: otherUID, Gid: otherUID},
+	}
+	if _, err := cmd2.CombinedOutput(); err == nil {
+		log.Printf("[Sandbox] UID test: other UID CAN access — EFS overriding UID, isolation ineffective")
+		return false
+	}
+
+	log.Printf("[Sandbox] UID test: owner OK, other denied ✓")
+	return true
+}
+
+// MemberCredentials 根據 memberID 計算專屬 UID/GID（FNV-32 hash → 10000-59999）
+func MemberCredentials(memberID string) (uint32, uint32) {
+	h := fnv.New32a()
+	h.Write([]byte(memberID))
+	uid := 10000 + (h.Sum32() % 50000)
+	return uid, uid
+}
+
+// EnsureVaultPermissions 設定 vault 目錄的 owner 為 member UID，mode 700。
+// 每個 vault 目錄只在第一次呼叫時執行 recursive chown。
+func EnsureVaultPermissions(workDir string, uid, gid uint32) {
+	if _, loaded := vaultPermOnce.LoadOrStore(workDir, true); loaded {
+		return
+	}
+	start := time.Now()
+
+	os.Chown(workDir, int(uid), int(gid))
+	os.Chmod(workDir, 0700)
+
+	count := 0
+	filepath.WalkDir(workDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		os.Chown(path, int(uid), int(gid))
+		count++
+		return nil
+	})
+
+	log.Printf("[Sandbox] vault permissions set: %s → uid=%d, mode=0700, files=%d, elapsed=%dms",
+		workDir, uid, count, time.Since(start).Milliseconds())
+}
+
+// ChownToMember 將指定路徑的 owner 設為 member UID（用於 Go 服務寫入 vault 後）
+func ChownToMember(fullPath, memberID string) {
+	if !uidIsolationAvailable {
+		return
+	}
+	uid, gid := MemberCredentials(memberID)
+	os.Chown(fullPath, int(uid), int(gid))
+}
+
+// newClaudeCmd 建立 claude CLI 指令，以 member 專屬 UID 運行
+func newClaudeCmd(ctx context.Context, workDir, scope, userID string, claudeArgs []string) *exec.Cmd {
+	var cmd *exec.Cmd
+	if ctx != nil {
+		cmd = exec.CommandContext(ctx, "claude", claudeArgs...)
+	} else {
+		cmd = exec.Command("claude", claudeArgs...)
+	}
+	cmd.Dir = workDir
 	cmd.Env = append(os.Environ(),
 		"TASK_SCOPE="+scope,
 		"VAULT_USER_ID="+userID,
 	)
+
+	if os.Getuid() == 0 {
+		if uidIsolationAvailable {
+			uid, gid := MemberCredentials(userID)
+			EnsureVaultPermissions(workDir, uid, gid)
+			cmd.SysProcAttr = &syscall.SysProcAttr{
+				Credential: &syscall.Credential{Uid: uid, Gid: gid},
+			}
+		} else if mirrorUID > 0 {
+			// UID 隔離不可用，以 mirror user 運行（Claude CLI 拒絕 root）
+			cmd.SysProcAttr = &syscall.SysProcAttr{
+				Credential: &syscall.Credential{
+					Uid: uint32(mirrorUID),
+					Gid: uint32(mirrorGID),
+				},
+			}
+		}
+	}
+
 	return cmd
 }
 
@@ -397,8 +487,8 @@ func NewStreamCLI(workDir, scope, userID, sessionID, model string, resume bool, 
 	}
 	s.resetIdleTimer()
 
-	log.Printf("[CacheProfile] NewStreamCLI total — %dms, pid=%d, workDir=%s, sessionID=%s, resume=%v, bwrap=%v",
-		time.Since(funcStart).Milliseconds(), cmd.Process.Pid, workDir, sessionID, resume, bwrapAvailable)
+	log.Printf("[CacheProfile] NewStreamCLI total — %dms, pid=%d, workDir=%s, sessionID=%s, resume=%v, uidIsolation=%v",
+		time.Since(funcStart).Milliseconds(), cmd.Process.Pid, workDir, sessionID, resume, uidIsolationAvailable)
 	return s, nil
 }
 

@@ -21,6 +21,11 @@ fi
 VAULT_ROOT="${VAULT_ROOT:-/vaults}"
 mkdir -p "$VAULT_ROOT"
 
+# 確保 shared 目錄存在且所有 UID 可讀取
+mkdir -p "$VAULT_ROOT/shared"
+chown root:root "$VAULT_ROOT/shared"
+chmod 755 "$VAULT_ROOT/shared"
+
 # 打印環境配置（不包含敏感數據）
 echo "啟動配置:"
 echo "- 端口: ${PORT:-8080}"

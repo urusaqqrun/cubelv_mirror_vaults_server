@@ -929,6 +929,7 @@ func (h *WsHandler) updateUserLocale(memberID, timezone, lang string) {
 		// No user CLAUDE.md yet — create with locale block
 		content := fmt.Sprintf("# 用戶個人化設定\n\n%s\n\n<!-- AIHINTS:START -->\n<!-- AIHINTS:END -->\n\n<!-- AI_MEMORY:START -->\n<!-- AI_MEMORY:END -->\n", newBlock)
 		h.vaultFS.WriteFile(claudeMDPath, []byte(content))
+		executor.ChownToMember(filepath.Join(h.vaultRoot, claudeMDPath), memberID)
 		return
 	}
 
@@ -957,6 +958,7 @@ func (h *WsHandler) updateUserLocale(memberID, timezone, lang string) {
 	}
 
 	h.vaultFS.WriteFile(claudeMDPath, []byte(content))
+	executor.ChownToMember(filepath.Join(h.vaultRoot, claudeMDPath), memberID)
 }
 
 // enforceMaxCLIs kills oldest CLIs for a user if they exceed maxCount.
