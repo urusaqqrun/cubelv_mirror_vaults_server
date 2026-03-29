@@ -3,7 +3,6 @@ package api
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -14,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/gorilla/websocket"
 	"github.com/urusaqqrun/vault-mirror-service/database"
 	"github.com/urusaqqrun/vault-mirror-service/executor"
@@ -103,11 +103,19 @@ func (h *WsHandler) RegisterRoutes(mux *http.ServeMux) {
 
 // HandleWarmup pre-warms a CLI process into the pool.
 func (h *WsHandler) HandleWarmup(w http.ResponseWriter, r *http.Request) {
-	memberID := r.URL.Query().Get("memberID")
-	if memberID == "" {
-		http.Error(w, "memberID required", 400)
+	token := r.URL.Query().Get("token")
+	if token == "" {
+		http.Error(w, "token required", 401)
 		return
 	}
+	token = strings.TrimPrefix(token, "Bearer ")
+	claims, err := verifyJWT(token)
+	if err != nil {
+		log.Printf("[Warmup] JWT verification failed: %v", err)
+		http.Error(w, "invalid token", 401)
+		return
+	}
+	memberID := claims.UserID
 	model := r.URL.Query().Get("model")
 
 	if val, ok := h.cliPool.Load(memberID); ok {
@@ -145,7 +153,6 @@ func (h *WsHandler) HandleWarmup(w http.ResponseWriter, r *http.Request) {
 // HandleWebSocket upgrades an HTTP connection to WebSocket and starts the read loop.
 func (h *WsHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	memberID := q.Get("memberID")
 	sessionID := q.Get("sessionID")
 	mode := q.Get("mode")
 	model := q.Get("model")
@@ -153,20 +160,19 @@ func (h *WsHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	timezone := q.Get("timezone")
 	lang := q.Get("lang")
 
-	if memberID == "" {
-		http.Error(w, "memberID required", 400)
-		return
-	}
-
 	if token == "" {
 		http.Error(w, "token required", 401)
 		return
 	}
-	jwtRole := extractJWTRole(token)
-	if jwtRole == "guest" {
-		http.Error(w, "guest users cannot use AI features", 403)
+	token = strings.TrimPrefix(token, "Bearer ")
+
+	claims, err := verifyJWT(token)
+	if err != nil {
+		log.Printf("[WS] JWT verification failed: %v", err)
+		http.Error(w, "invalid token", 401)
 		return
 	}
+	memberID := claims.UserID
 
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -262,6 +268,9 @@ func (h *WsHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 				}
 				log.Printf("[WS] warmup model mismatch (pool=%s, req=%s), creating new CLI", wc.model, model)
 			}
+			if sessionID != "" {
+				executor.CleanupSessionJSONL(sessionID, workDir)
+			}
 			cli, err := executor.NewStreamCLI(workDir, "chat", memberID, sessionID, model, false, 5*time.Minute)
 			if err != nil {
 				log.Printf("[WS] CLI start failed for %s: %v", memberID, err)
@@ -318,6 +327,9 @@ func (h *WsHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		if sessionID != "" {
+			executor.CleanupSessionJSONL(sessionID, workDir)
+		}
 		cli, err := executor.NewStreamCLI(workDir, "chat", memberID, sessionID, model, false, 5*time.Minute)
 		if err != nil {
 			log.Printf("[WS] CLI start failed for %s: %v", memberID, err)
@@ -668,6 +680,21 @@ func (h *WsHandler) handleMessage(session *WsSession, sessionKey string, msg map
 				}
 			}
 
+		case eventType == "result" && subtype == "error_during_execution":
+			errMsgs, _ := parsed["errors"].([]interface{})
+			errStr := "CLI error"
+			if len(errMsgs) > 0 {
+				if s, ok := errMsgs[0].(string); ok {
+					errStr = s
+				}
+			}
+			log.Printf("[WS-CLI] error_during_execution: %s", errStr)
+			session.Send(map[string]interface{}{
+				"type":     "stream_error",
+				"memberID": session.memberID,
+				"error":    errStr,
+			})
+
 		case eventType == "result" && subtype == "success":
 			if resultText, ok := parsed["result"].(string); ok && resultText != "" && accumulatedText == "" {
 				accumulatedText = resultText
@@ -746,48 +773,52 @@ func (h *WsHandler) handleMessage(session *WsSession, sessionKey string, msg map
 	go func() {
 		snapBefore := <-snapCh
 		if snapBefore.err == nil {
-			snapAfterStart := time.Now()
-			afterSnap, afterIDMap, afterErr := executor.TakeIncrementalSnapshot(
-				h.vaultFS, session.memberID, snapBefore.snap, snapBefore.idMap,
-			)
-			if afterErr != nil {
-				log.Printf("[WS] incremental snapshot after error: %v", afterErr)
+			if len(sentToolUseIDs) == 0 {
+				log.Printf("[CacheProfile] snapshot_after SKIPPED — no tool_use, member=%s", session.memberID)
+				h.snapCache.Store(session.memberID, &cachedSnapshot{snap: snapBefore.snap, idMap: snapBefore.idMap})
 			} else {
-				diff := executor.ComputeDiff(snapBefore.snap, afterSnap)
-				hasChanges := len(diff.Created)+len(diff.Modified)+len(diff.Deleted)+len(diff.Moved) > 0
-				log.Printf("[CacheProfile] snapshot_after INCREMENTAL+diff — %dms, changed=%v, +%d ~%d -%d mv%d",
-					time.Since(snapAfterStart).Milliseconds(), hasChanges,
-					len(diff.Created), len(diff.Modified), len(diff.Deleted), len(diff.Moved))
+				snapAfterStart := time.Now()
+				afterSnap, afterIDMap, afterErr := executor.TakeIncrementalSnapshot(
+					h.vaultFS, session.memberID, snapBefore.snap, snapBefore.idMap,
+				)
+				if afterErr != nil {
+					log.Printf("[WS] incremental snapshot after error: %v", afterErr)
+				} else {
+					diff := executor.ComputeDiff(snapBefore.snap, afterSnap)
+					hasChanges := len(diff.Created)+len(diff.Modified)+len(diff.Deleted)+len(diff.Moved) > 0
+					log.Printf("[CacheProfile] snapshot_after INCREMENTAL+diff — %dms, changed=%v, +%d ~%d -%d mv%d, tools=%d",
+						time.Since(snapAfterStart).Milliseconds(), hasChanges,
+						len(diff.Created), len(diff.Modified), len(diff.Deleted), len(diff.Moved), len(sentToolUseIDs))
 
-				if hasChanges {
-					// Writeback: convert vault file diffs to DB items
-					movedEntries := make([]mirror.MovedFileEntry, len(diff.Moved))
-					for i, m := range diff.Moved {
-						movedEntries[i] = mirror.MovedFileEntry{OldPath: m.OldPath, NewPath: m.NewPath}
-					}
-					importer := mirror.NewImporter(h.vaultFS)
-					entries, importErr := importer.ProcessDiff(
-						session.memberID, diff.Created, diff.Modified, diff.Deleted, movedEntries, snapBefore.idMap,
-					)
-					if importErr != nil {
-						log.Printf("[WS] importer.ProcessDiff error: %v", importErr)
-					} else if len(entries) > 0 {
-						wbResult := executor.WriteBack(
-							context.Background(), h.itemWriter,
-							session.memberID, entries,
+					if hasChanges {
+						movedEntries := make([]mirror.MovedFileEntry, len(diff.Moved))
+						for i, m := range diff.Moved {
+							movedEntries[i] = mirror.MovedFileEntry{OldPath: m.OldPath, NewPath: m.NewPath}
+						}
+						importer := mirror.NewImporter(h.vaultFS)
+						entries, importErr := importer.ProcessDiff(
+							session.memberID, diff.Created, diff.Modified, diff.Deleted, movedEntries, snapBefore.idMap,
 						)
-						log.Printf("[WS] WriteBack: +%d ~%d mv%d -%d err%d",
-							wbResult.Created, wbResult.Updated, wbResult.Moved,
-							wbResult.Deleted, wbResult.Errors)
-					}
+						if importErr != nil {
+							log.Printf("[WS] importer.ProcessDiff error: %v", importErr)
+						} else if len(entries) > 0 {
+							wbResult := executor.WriteBack(
+								context.Background(), h.itemWriter,
+								session.memberID, entries,
+							)
+							log.Printf("[WS] WriteBack: +%d ~%d mv%d -%d err%d",
+								wbResult.Created, wbResult.Updated, wbResult.Moved,
+								wbResult.Deleted, wbResult.Errors)
+						}
 
-					h.updateDBSnapshot(session.memberID, afterSnap, afterIDMap, diff)
-					session.Send(map[string]interface{}{
-						"type":     "vault_changed",
-						"memberID": session.memberID,
-					})
+						h.updateDBSnapshot(session.memberID, afterSnap, afterIDMap, diff)
+						session.Send(map[string]interface{}{
+							"type":     "vault_changed",
+							"memberID": session.memberID,
+						})
+					}
+					h.snapCache.Store(session.memberID, &cachedSnapshot{snap: afterSnap, idMap: afterIDMap})
 				}
-				h.snapCache.Store(session.memberID, &cachedSnapshot{snap: afterSnap, idMap: afterIDMap})
 			}
 		}
 
@@ -1347,23 +1378,39 @@ func (h *WsHandler) recordBilling(memberID, mode, sessionID string, resultEvent 
 		modelName, int(inputTokens), int(outputTokens), int(cacheCreation), int(cacheRead))
 }
 
-func extractJWTRole(token string) string {
-	parts := strings.Split(token, ".")
-	if len(parts) != 3 {
-		return ""
+// jwtClaims 對應 membercenter 簽發的 JWT 結構
+type jwtClaims struct {
+	UserID    string `json:"user_id"`
+	Email     string `json:"email"`
+	TokenType string `json:"token_type"`
+	jwt.RegisteredClaims
+}
+
+// verifyJWT 驗證 JWT 簽名並回傳 claims；驗簽失敗回傳 error。
+func verifyJWT(tokenStr string) (*jwtClaims, error) {
+	secret := os.Getenv("JWT_SECRET")
+	if secret == "" {
+		return nil, fmt.Errorf("JWT_SECRET not configured")
 	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		payload, err = base64.StdEncoding.DecodeString(parts[1])
-		if err != nil {
-			return ""
+
+	claims := &jwtClaims{}
+	token, err := jwt.ParseWithClaims(tokenStr, claims, func(t *jwt.Token) (interface{}, error) {
+		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
 		}
+		return []byte(secret), nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("JWT parse error: %w", err)
 	}
-	var claims struct {
-		Role string `json:"role"`
+	if !token.Valid {
+		return nil, fmt.Errorf("invalid JWT token")
 	}
-	if json.Unmarshal(payload, &claims) != nil {
-		return ""
+	if claims.TokenType != "access" {
+		return nil, fmt.Errorf("invalid token type: %s", claims.TokenType)
 	}
-	return claims.Role
+	if claims.UserID == "" {
+		return nil, fmt.Errorf("missing user_id in JWT")
+	}
+	return claims, nil
 }

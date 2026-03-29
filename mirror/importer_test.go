@@ -142,7 +142,7 @@ func TestProcessDiff_CardCreated(t *testing.T) {
 	imp, fs := setupImporterFS()
 
 	cardJSON := `{"id":"card1","name":"鼎泰豐","itemType":"CARD","fields":{"parentID":"c1","fields":"{\"店名\":\"鼎泰豐\"}"}}`
-	fs.WriteFile("user1/CARD/美食/鼎泰��.json", []byte(cardJSON))
+	fs.WriteFile("user1/CARD/美食/鼎泰豐.json", []byte(cardJSON))
 
 	entries, err := imp.ProcessDiff("user1", []string{"CARD/美食/鼎泰豐.json"}, nil, nil, nil, nil)
 	if err != nil {

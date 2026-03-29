@@ -106,15 +106,16 @@ func TestEventPipeline_FolderUpdate_ExportsSiblingJSON(t *testing.T) {
 }
 
 func TestEventPipeline_NoteCreate_ExportsJSON(t *testing.T) {
-	fs := mirror.NewMemoryVaultFS()
 	title := "新筆記"
 	content := "<p>Hello</p>"
+	fs := mirror.NewMemoryVaultFS()
 	reader := &mockDataReader{
 		notes: map[string]*model.Note{
 			"n1": {ID: "n1", Title: &title, Content: &content, ParentID: "f1", Version: 3, CreateAt: 1, UpdateAt: 2},
 		},
 		items: map[string]*model.Item{
 			"f1": {ID: "f1", Name: "工作", Type: "NOTE_FOLDER", Fields: map[string]interface{}{}},
+			"n1": {ID: "n1", Name: "新筆記", Type: "NOTE", Fields: map[string]interface{}{"parentID": "f1", "content": "<p>Hello</p>"}},
 		},
 	}
 

@@ -127,6 +127,9 @@ func (r *PathResolver) invalidateCache() {
 
 // resolveTypeFromItemType 將 itemType 對應到 Vault 根目錄。
 func resolveTypeFromItemType(itemType string) string {
+	if itemType == "" {
+		return "NOTE"
+	}
 	if strings.HasSuffix(itemType, "_FOLDER") {
 		return strings.TrimSuffix(itemType, "_FOLDER")
 	}

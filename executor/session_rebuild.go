@@ -3,6 +3,7 @@ package executor
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -55,13 +56,13 @@ func RebuildSessionJSONL(sessionID, workDir, memberID string, messages []Session
 		return fmt.Errorf("get home dir: %w", err)
 	}
 
-	sessionsDir := filepath.Join(homeDir, ".claude", "projects", encodedWorkDir, "sessions")
-	if err := os.MkdirAll(sessionsDir, 0755); err != nil {
-		return fmt.Errorf("mkdir sessions: %w", err)
+	projectDir := filepath.Join(homeDir, ".claude", "projects", encodedWorkDir)
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
+		return fmt.Errorf("mkdir project dir: %w", err)
 	}
 
-	filePath := filepath.Join(sessionsDir, sessionID+".jsonl")
-	cwd := filepath.Join("/vaults", memberID)
+	filePath := filepath.Join(projectDir, sessionID+".jsonl")
+	cwd := workDir
 
 	var lines []string
 	var prevUUID interface{} // null for the first entry
@@ -192,6 +193,23 @@ func RebuildSessionJSONL(sessionID, workDir, memberID string, messages []Session
 
 	content := strings.Join(lines, "\n") + "\n"
 	return os.WriteFile(filePath, []byte(content), 0644)
+}
+
+// CleanupSessionJSONL removes the JSONL file for a session so that
+// --session-id won't conflict with an existing session on disk.
+func CleanupSessionJSONL(sessionID, workDir string) {
+	if sessionID == "" {
+		return
+	}
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	encoded := encodeProjectPath(workDir)
+	jsonlPath := filepath.Join(homeDir, ".claude", "projects", encoded, sessionID+".jsonl")
+	if err := os.Remove(jsonlPath); err == nil {
+		log.Printf("[SessionCleanup] removed stale JSONL: %s", jsonlPath)
+	}
 }
 
 // encodeProjectPath produces the directory name Claude CLI uses for a project.

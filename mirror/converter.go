@@ -30,8 +30,8 @@ func MirrorJSONToItem(raw []byte) (*ItemMirrorData, error) {
 	if err := json.Unmarshal(raw, &data); err != nil {
 		return nil, err
 	}
-	if data.ID == "" || data.ItemType == "" {
-		return nil, fmt.Errorf("invalid mirror json: missing id or itemType")
+	if data.ItemType == "" {
+		return nil, fmt.Errorf("invalid mirror json: missing itemType")
 	}
 	// 如果 Fields 為空，嘗試從 flat JSON 收集非標準 key 到 Fields
 	if data.Fields == nil || len(data.Fields) == 0 {
