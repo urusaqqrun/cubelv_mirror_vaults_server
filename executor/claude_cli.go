@@ -44,9 +44,39 @@ func init() {
 	if testUIDIsolation() {
 		uidIsolationAvailable = true
 		log.Printf("[Sandbox] UID isolation available — per-member filesystem permissions enabled")
+		migrateExistingVaults()
 	} else {
 		log.Printf("[Sandbox] UID isolation NOT effective (EFS may override UID), using mirror user fallback")
 	}
+}
+
+// migrateExistingVaults 啟動時掃描所有既有 vault，chown + chmod 700 以堵住舊 UID 1000 漏洞
+func migrateExistingVaults() {
+	vaultRoot := os.Getenv("VAULT_ROOT")
+	if vaultRoot == "" {
+		vaultRoot = "/vaults"
+	}
+
+	entries, err := os.ReadDir(vaultRoot)
+	if err != nil {
+		log.Printf("[Sandbox] migrate: cannot read %s: %v", vaultRoot, err)
+		return
+	}
+
+	start := time.Now()
+	migrated := 0
+	for _, e := range entries {
+		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") || e.Name() == "shared" {
+			continue
+		}
+		memberID := e.Name()
+		uid, gid := MemberCredentials(memberID)
+		workDir := filepath.Join(vaultRoot, memberID)
+		EnsureVaultPermissions(workDir, uid, gid)
+		migrated++
+	}
+
+	log.Printf("[Sandbox] vault migration complete: %d vaults in %dms", migrated, time.Since(start).Milliseconds())
 }
 
 // testUIDIsolation 在 /vaults/ 建立臨時目錄測試 chown + setuid 是否真正隔離
@@ -110,11 +140,21 @@ func MemberCredentials(memberID string) (uint32, uint32) {
 }
 
 // EnsureVaultPermissions 設定 vault 目錄的 owner 為 member UID，mode 700。
-// 每個 vault 目錄只在第一次呼叫時執行 recursive chown。
+// 每個 vault 目錄只在第一次呼叫時執行 recursive chown；如果 UID + mode 已正確則跳過。
 func EnsureVaultPermissions(workDir string, uid, gid uint32) {
 	if _, loaded := vaultPermOnce.LoadOrStore(workDir, true); loaded {
 		return
 	}
+
+	// 快速檢查：目錄已是正確 UID + mode 700 → 跳過 recursive walk
+	if info, err := os.Stat(workDir); err == nil {
+		if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+			if stat.Uid == uid && stat.Gid == gid && info.Mode().Perm() == 0700 {
+				return
+			}
+		}
+	}
+
 	start := time.Now()
 
 	os.Chown(workDir, int(uid), int(gid))
