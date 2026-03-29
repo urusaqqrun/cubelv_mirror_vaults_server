@@ -214,9 +214,12 @@ func ensurePasswdEntry(uid, gid uint32) {
 }
 
 // fixClaudeHomePerms 確保 /home/mirror 及 .claude/ 下所有檔案可被任意 UID 存取。
-// CLI 動態建立的 sessions/、policy-limits.json 預設 mode 700/600，需修正。
+// CLI 動態建立的 .claude.json、sessions/、policy-limits.json 預設 mode 600/700，需修正。
 func fixClaudeHomePerms() {
-	os.Chmod("/home/mirror", 0755)
+	// HOME 目錄需可寫，member UID 才能建立 .claude.json 等檔案
+	os.Chmod("/home/mirror", 0777)
+	// .claude.json 在 HOME 根目錄（非 .claude/ 內），需單獨修正
+	os.Chmod("/home/mirror/.claude.json", 0666)
 	filepath.WalkDir("/home/mirror/.claude", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
