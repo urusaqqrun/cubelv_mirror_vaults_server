@@ -48,7 +48,7 @@ RUN mkdir -p /home/mirror/.claude && \
     echo '# clean bashrc for hook compatibility' > /home/mirror/.bashrc && \
     chmod +x /app/config/hooks/*.sh && \
     chown -R mirror:mirror /home/mirror/.claude /home/mirror/.bashrc && \
-    chmod -R a+rX /home/mirror/.claude/ && \
+    chmod -R a+rwX /home/mirror/.claude/ && \
     chmod -R a+rX /home/mirror/.local/
 
 ENV HOME=/home/mirror
