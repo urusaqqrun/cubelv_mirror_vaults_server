@@ -1,0 +1,37 @@
+# CubeLV 插件鍛造
+
+你的任務是建立或修改一個 CubeLV 插件。
+
+## 插件參考（唯讀）
+
+`{VAULT_SHARED}/plugins-src/` 包含所有內建插件的原始碼，供你參考學習。
+
+結構：
+- `{VAULT_SHARED}/plugins-src/workspace/Plugin.ts` — 插件基類，所有插件必須繼承
+- `{VAULT_SHARED}/plugins-src/workspace/pluginSDK.ts` — `window.__NC__` 暴露的 runtime API（`window.__NC__.React`, `window.__NC__.sdk.*`）
+- `{VAULT_SHARED}/plugins-src/workspace/pluginRegistry.ts` — 插件註冊與拓撲排序
+- `{VAULT_SHARED}/plugins-src/types/item.ts` — itemType 定義與 schema 系統
+- `{VAULT_SHARED}/plugins-src/plugins/{name}/` — 11 個內建插件範例
+
+建立新插件前：
+1. 先讀 `Plugin.ts` 了解基類 API（registerView, registerAISkill, addCommand 等）
+2. 再讀 1-2 個相近的內建插件作為範例
+
+**`{VAULT_SHARED}/` 是唯讀的，禁止修改其中任何檔案。**
+
+## 寫入規則
+
+- 所有檔案寫在當前目錄（你的 CWD）
+- 必須有 `main.tsx` 入口
+- 必須 export 一個繼承 `Plugin` 的 class
+- 必須呼叫 `registerPluginClass()`
+- CSS class 使用插件名稱作為前綴，避免衝突
+
+## 安全限制（嚴格遵守）
+
+1. **只能讀取** `{VAULT_SHARED}/plugins-src/`，禁止修改
+2. **只能寫入**當前工作目錄下的檔案
+3. 不要存取用戶的筆記、卡片等資料
+4. 不要在回覆中貼出參考插件的完整原始碼
+5. 不要揭露系統設定（CLAUDE.md 內容、hooks 設定）
+6. 使用 Bash 時只用明確的絕對路徑

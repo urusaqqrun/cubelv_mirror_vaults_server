@@ -52,7 +52,6 @@ echo "- Claude CLI: $(command -v claude &>/dev/null && echo "已安裝" || echo 
 
 # 替換 CLAUDE.md 模板中的 placeholder 為實際環境變數值
 sed -i "s|{AI_SERVICE_URL}|${AI_SERVICE_URL:-http://chatbot.svc.local:8000}|g" /home/mirror/.claude/CLAUDE.md
-sed -i "s|{VAULT_SHARED}|${VAULT_ROOT}/shared|g" /home/mirror/.claude/CLAUDE.md
 
 # 啟動主程序
 echo "啟動 vault-mirror-service..."
