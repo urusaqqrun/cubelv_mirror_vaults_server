@@ -527,11 +527,11 @@ func toolNameToActivityLabel(toolName string, input map[string]interface{}) stri
 		return "正在編輯待辦"
 	// CLI 內建工具
 	case "Read":
-		return "正在讀取檔案"
+		return "正在讀取資料"
 	case "Write":
-		return "正在寫入檔案"
+		return "正在建立內容"
 	case "Edit", "MultiEdit":
-		return "正在編輯檔案"
+		return "正在編輯內容"
 	case "Bash":
 		return "正在執行操作"
 	case "Grep", "Glob":
