@@ -46,6 +46,7 @@ type WsSession struct {
 	mu        sync.Mutex
 	cli       *executor.StreamCLI
 	done      chan struct{} // 關閉時通知心跳 goroutine 停止
+	forgeToolCallIDs chan string // plugin forge tool_call_id queue
 }
 
 // Send writes a JSON message to the WebSocket connection (thread-safe).
@@ -147,8 +148,19 @@ func (h *WsHandler) HandleForgeAPI(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[ForgeAPI] found WebSocket session for member %s", req.MemberID)
 	}
 
+	// 從 session 取出對應的 tool_call_id
+	var toolCallID string
+	if session != nil {
+		select {
+		case toolCallID = <-session.forgeToolCallIDs:
+			log.Printf("[ForgeAPI] got tool_call_id: %s", toolCallID)
+		default:
+			log.Printf("[ForgeAPI] no tool_call_id available in queue")
+		}
+	}
+
 	// 執行插件鍛造（同步，阻塞到完成）
-	result := h.executePluginForge(session, req.MemberID, req.Title, req.Prompt)
+	result := h.executePluginForge(session, req.MemberID, req.Title, req.Prompt, toolCallID)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(result)
@@ -227,14 +239,15 @@ func (h *WsHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	session := &WsSession{
-		conn:      conn,
-		memberID:  memberID,
-		sessionID: sessionID,
-		mode:      mode,
-		model:     model,
-		lang:      lang,
-		status:    "idle",
-		done:      make(chan struct{}),
+		conn:             conn,
+		memberID:         memberID,
+		sessionID:        sessionID,
+		mode:             mode,
+		model:            model,
+		lang:             lang,
+		status:           "idle",
+		done:             make(chan struct{}),
+		forgeToolCallIDs: make(chan string, 10),
 	}
 	sessionKey := memberID + ":" + sessionID
 	h.sessions.Store(sessionKey, session)
@@ -698,6 +711,15 @@ sendAndProcess:
 					},
 				}
 					accumulatedToolCalls = append(accumulatedToolCalls, tc)
+					// plugin forge tool_call_id 暫存到 session，供 executePluginForge 使用
+					toolName, _ := blockMap["name"].(string)
+					if toolName == "mcp__plugin-forge__plugin_forge" && toolID != "" {
+						select {
+						case session.forgeToolCallIDs <- toolID:
+						default:
+							log.Printf("[WS] forgeToolCallIDs channel full, dropping: %s", toolID)
+						}
+					}
 					session.Send(map[string]interface{}{
 						"type":       "message",
 						"role":       "assistant",
@@ -1291,10 +1313,13 @@ func (h *WsHandler) handleInterrupt(session *WsSession) {
 
 // executePluginForge 啟動插件鍛造 Sub-Agent（同步阻塞到完成）
 // session 可為 nil（沒有 WebSocket 時不發意圖事件）
-func (h *WsHandler) executePluginForge(session *WsSession, memberID, forgeTitle, userPrompt string) map[string]interface{} {
-	log.Printf("[PluginForge] starting sub-agent: title=%q member=%s", forgeTitle, memberID)
+func (h *WsHandler) executePluginForge(session *WsSession, memberID, forgeTitle, userPrompt, toolCallID string) map[string]interface{} {
+	log.Printf("[PluginForge] starting sub-agent: title=%q member=%s tool_call_id=%s", forgeTitle, memberID, toolCallID)
 
 	sendWS := func(msg map[string]interface{}) {
+		if toolCallID != "" {
+			msg["tool_call_id"] = toolCallID
+		}
 		if session != nil {
 			if err := session.Send(msg); err != nil {
 				log.Printf("[PluginForge] WS send error: %v (type=%v)", err, msg["type"])
