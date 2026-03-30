@@ -1497,7 +1497,7 @@ func (h *WsHandler) executePluginForge(session *WsSession, memberID, forgeTitle,
 
 	sendWS(map[string]interface{}{"type": "sub_agent_intent", "intent": "註冊插件..."})
 
-	// 寫入 PLUGIN item
+	// 寫入 PLUGIN item（vault JSON + PG）
 	pluginID := fmt.Sprintf("%x%012x", time.Now().UnixNano()&0xFFFFFFFF, time.Now().UnixNano()>>32)
 	if len(pluginID) > 24 {
 		pluginID = pluginID[:24]
@@ -1514,6 +1514,17 @@ func (h *WsHandler) executePluginForge(session *WsSession, memberID, forgeTitle,
 		log.Printf("[PluginForge] failed to write PLUGIN item: %v", upsertErr)
 	} else {
 		log.Printf("[PluginForge] PLUGIN item written: id=%s dir=%s hash=%s", pluginID, pluginDir, bundleHash)
+	}
+
+	// 同時寫 PLUGIN JSON 到 vault 讓 AI 可管理
+	pluginJSON, _ := json.MarshalIndent(map[string]interface{}{
+		"_id": pluginID, "itemType": "PLUGIN", "name": forgeTitle,
+		"pluginDir": pluginDir, "bundleHash": bundleHash,
+		"version": 1, "status": "active", "description": forgeTitle,
+	}, "", "  ")
+	pluginJSONPath := filepath.Join(memberID, "PLUGIN", pluginDir+".json")
+	if writeErr := h.vaultFS.WriteFile(pluginJSONPath, pluginJSON); writeErr != nil {
+		log.Printf("[PluginForge] failed to write PLUGIN json to vault: %v", writeErr)
 	}
 
 	sendWS(map[string]interface{}{"type": "sub_agent_complete", "status": "success", "title": forgeTitle,

@@ -77,3 +77,33 @@
 
 Sub-Agent 會自動讀取內建插件原始碼作為參考、建立插件、編譯並註冊。工具回傳結果後告知用戶即可。
 
+## 插件管理
+
+`PLUGIN/` 資料夾存放插件設定，AI 可直接讀寫管理。
+
+### 開關插件
+
+讀寫 `PLUGIN/_prefs.json`：
+
+```json
+{
+  "_id": "plugin-prefs",
+  "itemType": "PLUGIN_PREFS",
+  "name": "插件偏好設定",
+  "disabled": ["NotePlugin", "ClassifyPlugin"]
+}
+```
+
+- `disabled` 陣列：被關閉的插件 ID（不在列表中 = 啟用）
+- 開啟插件：從 disabled 移除
+- 關閉插件：加入 disabled
+- 如果檔案不存在，所有插件預設啟用
+
+內建插件 ID：NotePlugin, TodoPlugin, CardPlugin, ChartPlugin, EditorPlugin, SidebarPlugin, AICommanderPlugin, AutoTaskPlugin, MaterialLibraryPlugin, ClassifyPlugin
+
+動態插件 ID：使用 `PLUGIN/{name}.json` 裡的 pluginDir
+
+### 查看動態插件
+
+`PLUGIN/{pluginDir}.json` — 每個 AI 鍛造的插件一個 JSON，包含 status、bundleHash 等。
+
