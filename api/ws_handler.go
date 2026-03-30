@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -894,25 +895,13 @@ func (h *WsHandler) handleMessage(session *WsSession, sessionKey string, msg map
 		}
 	}
 
-	// 6.5 偵測 <<<FORGE:xxx>>> 或 <<<FORGE xxx>>> 標記
-	forgeIdx := strings.Index(accumulatedText, "<<<FORGE:")
-	if forgeIdx < 0 {
-		forgeIdx = strings.Index(accumulatedText, "<<<FORGE ")
-	}
-	if forgeIdx >= 0 {
-		// 找 prefix 長度（"<<<FORGE:" 或 "<<<FORGE "）
-		prefixEnd := forgeIdx + len("<<<FORGE:")
-		if accumulatedText[forgeIdx+len("<<<FORGE")] == ' ' {
-			prefixEnd = forgeIdx + len("<<<FORGE ")
-		}
-		end := strings.Index(accumulatedText[forgeIdx:], ">>>")
-		if end > 0 {
-			forgeTitle = strings.TrimSpace(accumulatedText[prefixEnd : forgeIdx+end])
-			marker := accumulatedText[forgeIdx : forgeIdx+end+len(">>>")]
-			accumulatedText = strings.Replace(accumulatedText, marker, "", 1)
-			accumulatedText = strings.TrimSpace(accumulatedText)
-			log.Printf("[PluginForge] detected forge marker: title=%q, member=%s", forgeTitle, session.memberID)
-		}
+	// 6.5 偵測 FORGE 標記（容許 <<< 或 << 以及 : 或空格分隔）
+	forgeRe := regexp.MustCompile(`<{2,3}FORGE[:\s]+(.+?)>{2,3}`)
+	if m := forgeRe.FindStringSubmatch(accumulatedText); len(m) > 1 {
+		forgeTitle = strings.TrimSpace(m[1])
+		accumulatedText = strings.Replace(accumulatedText, m[0], "", 1)
+		accumulatedText = strings.TrimSpace(accumulatedText)
+		log.Printf("[PluginForge] detected forge marker: title=%q, member=%s", forgeTitle, session.memberID)
 	}
 
 	// 7. Save assistant message
