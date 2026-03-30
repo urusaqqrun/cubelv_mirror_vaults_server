@@ -4,11 +4,13 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -1297,28 +1299,137 @@ func (h *WsHandler) handlePluginForge(session *WsSession, sessionKey, forgeTitle
 			"status": "error",
 			"error":  waitErr.Error(),
 		})
-	} else {
-		log.Printf("[PluginForge] sub-agent completed successfully")
-		session.Send(map[string]interface{}{
-			"type":   "sub_agent_complete",
-			"status": "success",
-			"title":  forgeTitle,
-		})
+		return
 	}
 
-	// 7. 將結果注入 Main Agent 對話（讓 Main Agent 知道結果）
+	// 7. 從 forgeTitle 推導 pluginDir（取英文小寫，空格替換為 -）
+	pluginDir := strings.ToLower(strings.ReplaceAll(forgeTitle, " ", "-"))
+	// 移除非字母數字字元
+	cleanDir := ""
+	for _, c := range pluginDir {
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' {
+			cleanDir += string(c)
+		}
+	}
+	if cleanDir == "" {
+		cleanDir = "plugin"
+	}
+	pluginDir = cleanDir
+
+	// 檢查 main.tsx 是否存在
+	mainTsxPath := filepath.Join(session.memberID, "plugins", pluginDir, "main.tsx")
+	if !h.vaultFS.Exists(mainTsxPath) {
+		// 嘗試掃描 plugins/ 下找到實際的目錄
+		pluginsPath := filepath.Join(session.memberID, "plugins")
+		entries, _ := h.vaultFS.ListDir(pluginsPath)
+		for _, e := range entries {
+			if e.IsDir() {
+				testPath := filepath.Join(session.memberID, "plugins", e.Name(), "main.tsx")
+				if h.vaultFS.Exists(testPath) {
+					pluginDir = e.Name()
+					break
+				}
+			}
+		}
+	}
+
+	session.Send(map[string]interface{}{
+		"type":   "sub_agent_intent",
+		"intent": "編譯插件...",
+	})
+
+	// 8. esbuild 打包
+	entryPath := filepath.Join(workDir, "plugins", pluginDir, "main.tsx")
+	bundlePath := filepath.Join(workDir, "plugins", pluginDir, "bundle.js")
+
+	esbuildCmd := exec.CommandContext(ctx, "esbuild",
+		entryPath,
+		"--bundle",
+		"--format=iife",
+		"--global-name=__plugin__",
+		"--jsx=automatic",
+		"--loader:.tsx=tsx",
+		"--loader:.ts=ts",
+		"--loader:.css=css",
+		"--outfile="+bundlePath,
+	)
+	esbuildOut, esbuildErr := esbuildCmd.CombinedOutput()
+	if esbuildErr != nil {
+		log.Printf("[PluginForge] esbuild failed: %v\noutput: %s", esbuildErr, string(esbuildOut))
+		session.Send(map[string]interface{}{
+			"type":   "sub_agent_complete",
+			"status": "error",
+			"error":  fmt.Sprintf("esbuild 編譯失敗: %s", string(esbuildOut)),
+		})
+		return
+	}
+	log.Printf("[PluginForge] esbuild success: %s", bundlePath)
+
+	// 9. 計算 bundle hash
+	bundleFullPath := filepath.Join(session.memberID, "plugins", pluginDir, "bundle.js")
+	bundleBytes, err := h.vaultFS.ReadFile(bundleFullPath)
+	bundleHash := ""
+	if err == nil {
+		hashSum := sha256.Sum256(bundleBytes)
+		bundleHash = fmt.Sprintf("%x", hashSum[:8])
+	}
+
+	session.Send(map[string]interface{}{
+		"type":   "sub_agent_intent",
+		"intent": "註冊插件...",
+	})
+
+	// 10. 寫入 PLUGIN item 到 PG
+	pluginID := fmt.Sprintf("%x%012x", time.Now().UnixNano()&0xFFFFFFFF, time.Now().UnixNano()>>32)
+	if len(pluginID) > 24 {
+		pluginID = pluginID[:24]
+	}
+
+	pluginDoc := executor.Doc{
+		"_id":      pluginID,
+		"itemType": "PLUGIN",
+		"name":     forgeTitle,
+		"fields": map[string]interface{}{
+			"pluginDir":   pluginDir,
+			"bundleHash":  bundleHash,
+			"version":     1,
+			"status":      "active",
+			"description": forgeTitle,
+			"createdAt":   time.Now().UnixMilli(),
+			"updatedAt":   time.Now().UnixMilli(),
+		},
+	}
+	if upsertErr := h.itemWriter.UpsertItem(context.Background(), session.memberID, pluginDoc); upsertErr != nil {
+		log.Printf("[PluginForge] failed to write PLUGIN item: %v", upsertErr)
+	} else {
+		log.Printf("[PluginForge] PLUGIN item written: id=%s dir=%s hash=%s", pluginID, pluginDir, bundleHash)
+	}
+
+	// 11. 通知前端
+	session.Send(map[string]interface{}{
+		"type":   "sub_agent_complete",
+		"status": "success",
+		"title":  forgeTitle,
+		"plugin": map[string]interface{}{
+			"id":         pluginID,
+			"pluginDir":  pluginDir,
+			"bundleHash": bundleHash,
+		},
+	})
+
+	// 12. 觸發 vault_changed 讓前端 sync 拿到新 PLUGIN item
+	session.Send(map[string]interface{}{
+		"type": "vault_changed",
+	})
+
+	// 13. 將結果注入 Main Agent 對話
 	session.mu.Lock()
 	mainCLI := session.cli
 	session.mu.Unlock()
 
 	if mainCLI != nil && mainCLI.IsAlive() {
-		resultMsg := fmt.Sprintf("插件鍛造完成：「%s」已建立。請告知用戶。", forgeTitle)
-		if waitErr != nil {
-			resultMsg = fmt.Sprintf("插件鍛造失敗：「%s」建立時發生錯誤：%v", forgeTitle, waitErr)
-		}
-		// 發送結果給 Main Agent（不觸發前端 stream_start）
+		resultMsg := fmt.Sprintf("插件鍛造完成：「%s」已建立並編譯成功。插件目錄：plugins/%s，bundleHash：%s。請告知用戶插件已可使用。", forgeTitle, pluginDir, bundleHash)
 		mainCLI.SendMessage(resultMsg)
-		// Main Agent 的回覆會透過下一次 handleMessage 自然流回前端
 	}
 }
 
