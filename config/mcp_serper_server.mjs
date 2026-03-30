@@ -3,15 +3,51 @@
  * Serper API MCP Server (Node.js)
  * Provides web search via Serper API (Google Search)
  * Protocol: MCP over stdio (JSON-RPC 2.0)
+ *
+ * 圖片搜尋含域名黑名單 + URL 可達性驗證（與 Python serper.py 同步）
  */
 
 import { createInterface } from 'readline';
 
 const SERPER_API_KEY = process.env.SERPER_API_KEY || '';
 
+const BLOCKED_IMAGE_DOMAINS = new Set([
+  'fbcdn.net', 'fb.com', 'facebook.com',
+  'instagram.com', 'cdninstagram.com',
+]);
+
+function isBlockedDomain(imageUrl) {
+  try {
+    const host = new URL(imageUrl).hostname;
+    for (const d of BLOCKED_IMAGE_DOMAINS) {
+      if (host === d || host.endsWith('.' + d)) return true;
+    }
+  } catch {}
+  return false;
+}
+
+async function verifyImageUrl(imageUrl) {
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 5000);
+    const res = await fetch(imageUrl, {
+      method: 'HEAD',
+      redirect: 'follow',
+      signal: ctrl.signal,
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+    });
+    clearTimeout(timer);
+    if (res.ok) {
+      const ct = res.headers.get('content-type') || '';
+      return ct.includes('image') || !ct;
+    }
+  } catch {}
+  return false;
+}
+
 const TOOL_DEF = {
   name: 'web_search',
-  description: '使用 Serper API 進行網路搜尋，返回 Google 搜尋結果。支援多種搜尋類型（網頁、圖片、新聞等）',
+  description: '使用 Serper API 進行網路搜尋，返回 Google 搜尋結果。支援多種搜尋類型（網頁、圖片、新聞等）。圖片搜尋會自動過濾不可用來源並驗證 URL。',
   inputSchema: {
     type: 'object',
     properties: {
@@ -29,33 +65,52 @@ async function doSearch(args) {
     return '錯誤：未設置 SERPER_API_KEY 環境變數。';
   }
   const query = args.q || '';
-  const num = args.num || 10;
+  const requestedNum = args.num || 10;
   const searchType = args.type || 'search';
   const lang = args.lang || 'zh-tw';
   if (!query) return '錯誤：查詢字串不能為空';
 
-  const urls = { search: 'https://google.serper.dev/search', images: 'https://google.serper.dev/images', news: 'https://google.serper.dev/news' };
-  const url = urls[searchType] || urls.search;
+  const apiUrls = { search: 'https://google.serper.dev/search', images: 'https://google.serper.dev/images', news: 'https://google.serper.dev/news' };
+  const apiUrl = apiUrls[searchType] || apiUrls.search;
 
-  const res = await fetch(url, {
+  const fetchNum = searchType === 'images' ? Math.max(requestedNum, 10) : requestedNum;
+
+  const res = await fetch(apiUrl, {
     method: 'POST',
     headers: { 'X-API-KEY': SERPER_API_KEY, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ q: query, num, gl: lang.split('-')[0], hl: lang })
+    body: JSON.stringify({ q: query, num: fetchNum, gl: lang.split('-')[0], hl: lang })
   });
   if (!res.ok) throw new Error(`Serper API ${res.status}: ${await res.text()}`);
   const data = await res.json();
 
   let text = `搜尋查詢：${query}\n找到約 ${data.searchInformation?.totalResults || 'N/A'} 筆結果\n\n`;
+
   if (searchType === 'search') {
-    (data.organic || []).slice(0, num).forEach((r, i) => {
+    (data.organic || []).slice(0, requestedNum).forEach((r, i) => {
       text += `${i + 1}. ${r.title || 'N/A'}\n   連結：${r.link || 'N/A'}\n   摘要：${r.snippet || 'N/A'}\n\n`;
     });
   } else if (searchType === 'images') {
-    (data.images || []).slice(0, num).forEach((r, i) => {
-      text += `${i + 1}. ${r.title || 'N/A'}\n   圖片：${r.imageUrl || 'N/A'}\n   來源：${r.link || 'N/A'}\n\n`;
-    });
+    const rawImages = data.images || [];
+    const candidates = rawImages.filter(r => r.imageUrl && !isBlockedDomain(r.imageUrl));
+
+    const verified = [];
+    const maxAttempts = Math.min(candidates.length, requestedNum + 3);
+    for (let i = 0; i < maxAttempts && verified.length < requestedNum; i++) {
+      const r = candidates[i];
+      if (await verifyImageUrl(r.imageUrl)) {
+        verified.push(r);
+      }
+    }
+
+    if (verified.length === 0) {
+      text += '未找到可用的圖片（全部驗證失敗或被過濾）。\n';
+    } else {
+      verified.forEach((r, i) => {
+        text += `${i + 1}. ${r.title || 'N/A'}\n   圖片：${r.imageUrl || 'N/A'}\n   來源：${r.link || 'N/A'}\n\n`;
+      });
+    }
   } else if (searchType === 'news') {
-    (data.news || []).slice(0, num).forEach((r, i) => {
+    (data.news || []).slice(0, requestedNum).forEach((r, i) => {
       text += `${i + 1}. ${r.title || 'N/A'}\n   來源：${r.source || 'N/A'}\n   連結：${r.link || 'N/A'}\n   時間：${r.date || 'N/A'}\n\n`;
     });
   }
