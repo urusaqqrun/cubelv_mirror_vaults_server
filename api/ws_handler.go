@@ -1338,7 +1338,9 @@ func (h *WsHandler) executePluginForge(session *WsSession, memberID, forgeTitle,
 	bundlePath := filepath.Join(workDir, "plugins", pluginDir, "bundle.js")
 	esbuildCmd := exec.CommandContext(ctx, "esbuild", entryPath, "--bundle", "--format=iife",
 		"--global-name=__plugin__", "--jsx=automatic", "--loader:.tsx=tsx", "--loader:.ts=ts",
-		"--loader:.css=css", "--outfile="+bundlePath)
+		"--loader:.css=css",
+		"--external:react", "--external:react-dom", "--external:zustand", "--external:i18next",
+		"--outfile="+bundlePath)
 	esbuildOut, esbuildErr := esbuildCmd.CombinedOutput()
 	if esbuildErr != nil {
 		errMsg := fmt.Sprintf("esbuild 編譯失敗: %s", string(esbuildOut))
