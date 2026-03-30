@@ -1202,7 +1202,7 @@ func (h *WsHandler) executePluginForge(session *WsSession, memberID, forgeTitle,
 	fullPrompt := fmt.Sprintf("%s\n\n---\n\n插件目錄名稱：plugins/%s/\n用戶需求：%s", instructions, cleanDir, userPrompt)
 	workDir := filepath.Join(vaultRoot, memberID)
 
-	sendWS(map[string]interface{}{"type": "sub_agent_intent", "intent": "啟動插件鍛造環境..."})
+	sendWS(map[string]interface{}{"type": "sub_agent_intent", "step": "forge_init"})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
@@ -1262,39 +1262,40 @@ func (h *WsHandler) executePluginForge(session *WsSession, memberID, forgeTitle,
 						if !ok || bm["type"] != "tool_use" {
 							continue
 						}
-						toolName, _ := bm["name"].(string)
-						input, _ := bm["input"].(map[string]interface{})
-						var intent string
-						switch toolName {
-						case "Read":
-							fp, _ := input["file_path"].(string)
-							intent = "讀取 " + filepath.Base(fp)
-						case "Write":
-							fp, _ := input["file_path"].(string)
-							intent = "建立 " + filepath.Base(fp)
-						case "Edit":
-							fp, _ := input["file_path"].(string)
-							intent = "修改 " + filepath.Base(fp)
-						case "Bash":
-							if d, _ := input["description"].(string); d != "" {
-								intent = d
-							} else if c, _ := input["command"].(string); c != "" {
-								if len(c) > 50 {
-									c = c[:50] + "..."
-								}
-								intent = "執行: " + c
+					toolName, _ := bm["name"].(string)
+					input, _ := bm["input"].(map[string]interface{})
+					evt := map[string]interface{}{"type": "sub_agent_intent", "tool_name": toolName}
+					switch toolName {
+					case "Read", "Write", "Edit":
+						if fp, _ := input["file_path"].(string); fp != "" {
+							evt["file_name"] = filepath.Base(fp)
+						}
+					case "Bash":
+						if d, _ := input["description"].(string); d != "" {
+							evt["description"] = d
+						} else if c, _ := input["command"].(string); c != "" {
+							if len(c) > 50 {
+								c = c[:50] + "..."
 							}
-						case "Glob":
-							intent = "搜尋檔案..."
-						case "Grep":
-							intent = "搜尋程式碼..."
-						default:
-							intent = toolName
+							evt["command"] = c
 						}
-						if intent != "" && intent != lastIntent {
-							lastIntent = intent
-							sendWS(map[string]interface{}{"type": "sub_agent_intent", "intent": intent})
+					case "Glob":
+						if p, _ := input["pattern"].(string); p != "" {
+							evt["pattern"] = p
 						}
+					case "Grep":
+						if p, _ := input["pattern"].(string); p != "" {
+							evt["pattern"] = p
+						}
+					}
+					intentKey := toolName
+					if fn, ok := evt["file_name"].(string); ok {
+						intentKey += ":" + fn
+					}
+					if intentKey != lastIntent {
+						lastIntent = intentKey
+						sendWS(evt)
+					}
 					}
 				}
 			}
@@ -1325,7 +1326,7 @@ func (h *WsHandler) executePluginForge(session *WsSession, memberID, forgeTitle,
 		}
 	}
 
-	sendWS(map[string]interface{}{"type": "sub_agent_intent", "intent": "編譯插件..."})
+	sendWS(map[string]interface{}{"type": "sub_agent_intent", "step": "forge_compile"})
 
 	// esbuild 打包（通用 external：所有 bare import 都 external，前端 require shim 解析）
 	entryPath := filepath.Join(workDir, "plugins", pluginDir, "main.tsx")
@@ -1350,7 +1351,7 @@ func (h *WsHandler) executePluginForge(session *WsSession, memberID, forgeTitle,
 		bundleHash = fmt.Sprintf("%x", hashSum[:8])
 	}
 
-	sendWS(map[string]interface{}{"type": "sub_agent_intent", "intent": "註冊插件..."})
+	sendWS(map[string]interface{}{"type": "sub_agent_intent", "step": "forge_register"})
 
 	// 寫入 PLUGIN item（vault JSON + PG）
 	pluginID := fmt.Sprintf("%x%012x", time.Now().UnixNano()&0xFFFFFFFF, time.Now().UnixNano()>>32)
