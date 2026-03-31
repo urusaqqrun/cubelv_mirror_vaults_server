@@ -1473,7 +1473,7 @@ func (h *WsHandler) executePluginForge(session *WsSession, memberID, forgeTitle,
 	// 預先推導 pluginDir 名稱給 Sub-Agent（保留 Unicode 字母/數字，加短 hash 防碰撞）
 	cleanDir := sanitizePluginDir(forgeTitle)
 
-	fullPrompt := fmt.Sprintf("%s\n\n---\n\n插件目錄名稱：plugins/%s/\n用戶需求：%s", instructions, cleanDir, userPrompt)
+	userPromptFull := fmt.Sprintf("插件目錄名稱：plugins/%s/\n用戶需求：%s", cleanDir, userPrompt)
 	workDir := filepath.Join(vaultRoot, memberID)
 
 	sendWS(map[string]interface{}{"type": "sub_agent_intent", "step": "forge_init"})
@@ -1488,7 +1488,8 @@ func (h *WsHandler) executePluginForge(session *WsSession, memberID, forgeTitle,
 		"--model", "claude-opus-4-6",
 		"--dangerously-skip-permissions",
 		"--mcp-config", "/home/mirror/.claude/settings.json",
-		"-p", fullPrompt,
+		"--append-system-prompt", instructions,
+		"-p", userPromptFull,
 	}
 
 	cmd := executor.NewClaudeCmdExported(ctx, workDir, "plugin", memberID, args)
