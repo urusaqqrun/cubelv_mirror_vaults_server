@@ -1195,6 +1195,7 @@ func (h *WsHandler) updateUserLocale(memberID, timezone, lang string) {
 }
 
 // enforceMaxCLIs kills oldest CLIs for a user if they exceed maxCount.
+// task mode 不受此限制，避免排程任務被一般 chat 擠掉。
 func (h *WsHandler) enforceMaxCLIs(memberID string, maxCount int) {
 	type sessionEntry struct {
 		key     string
@@ -1204,7 +1205,7 @@ func (h *WsHandler) enforceMaxCLIs(memberID string, maxCount int) {
 
 	h.sessions.Range(func(key, val any) bool {
 		s := val.(*WsSession)
-		if s.memberID == memberID {
+		if s.memberID == memberID && s.mode != "task" {
 			s.mu.Lock()
 			alive := s.cli != nil && s.cli.IsAlive()
 			s.mu.Unlock()
