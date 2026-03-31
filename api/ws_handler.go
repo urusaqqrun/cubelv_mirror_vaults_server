@@ -1476,6 +1476,21 @@ func (h *WsHandler) executePluginForge(session *WsSession, memberID, forgeTitle,
 	userPromptFull := fmt.Sprintf("插件目錄名稱：plugins/%s/\n用戶需求：%s", cleanDir, userPrompt)
 	workDir := filepath.Join(vaultRoot, memberID)
 
+	// 寫入 CLAUDE.md 讓 CLI 自動讀取為 project-level 指令
+	claudeMDPath := filepath.Join(workDir, "CLAUDE.md")
+	origCLAUDE, readOrigErr := os.ReadFile(claudeMDPath)
+	if writeErr := os.WriteFile(claudeMDPath, []byte(instructions), 0666); writeErr != nil {
+		log.Printf("[PluginForge] failed to write CLAUDE.md: %v", writeErr)
+	}
+	defer func() {
+		if readOrigErr == nil {
+			os.WriteFile(claudeMDPath, origCLAUDE, 0666)
+		} else {
+			os.Remove(claudeMDPath)
+		}
+	}()
+	executor.ChownToMember(claudeMDPath, memberID)
+
 	sendWS(map[string]interface{}{"type": "sub_agent_intent", "step": "forge_init"})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
@@ -1488,7 +1503,6 @@ func (h *WsHandler) executePluginForge(session *WsSession, memberID, forgeTitle,
 		"--model", "claude-opus-4-6",
 		"--dangerously-skip-permissions",
 		"--mcp-config", "/home/mirror/.claude/settings.json",
-		"--append-system-prompt", instructions,
 		"-p", userPromptFull,
 	}
 

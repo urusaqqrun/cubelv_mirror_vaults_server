@@ -17,6 +17,7 @@ type ChatStore interface {
 	GetMessagesBefore(ctx context.Context, sessionID, mode, cursorID string, limit int) ([]database.ChatMessage, bool, error)
 	GetSessionsByMemberID(ctx context.Context, memberID, mode string) ([]database.SessionInfo, error)
 	AddSessionMapping(ctx context.Context, memberID, sessionID, title, mode string) error
+	DeleteSessionMapping(ctx context.Context, memberID, sessionID string) error
 	DeleteUserSessions(ctx context.Context, memberID string) (int, int, error)
 	InsertChatMessage(ctx context.Context, msg *database.ChatMessage) error
 }
@@ -44,6 +45,7 @@ func (h *ChatHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /get_messages_before_checkpoint", h.GetMessagesBeforeCheckpoint)
 	mux.HandleFunc("POST /get_sessions", h.GetSessions)
 	mux.HandleFunc("POST /add_session", h.AddSession)
+	mux.HandleFunc("POST /delete_session", h.DeleteSession)
 	mux.HandleFunc("POST /get_session_status", h.GetSessionStatus)
 	mux.HandleFunc("DELETE /api/internal/user/{member_id}/data", h.DeleteUserData)
 }
@@ -176,6 +178,32 @@ func (h *ChatHandler) AddSession(w http.ResponseWriter, r *http.Request) {
 	err := h.store.AddSessionMapping(r.Context(), memberID, req.SessionID, req.SessionTitle, req.Mode)
 	if err != nil {
 		log.Printf("[ChatHandler] AddSession error: %v", err)
+		chatWriteError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	chatWriteJSON(w, http.StatusOK, map[string]interface{}{"success": true})
+}
+
+// DeleteSession deletes a single session and its chat messages.
+func (h *ChatHandler) DeleteSession(w http.ResponseWriter, r *http.Request) {
+	memberID, ok := memberIDFromHeader(w, r)
+	if !ok {
+		return
+	}
+	var req struct {
+		SessionID string `json:"sessionID"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		chatWriteError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.SessionID == "" {
+		chatWriteError(w, http.StatusBadRequest, "sessionID is required")
+		return
+	}
+
+	if err := h.store.DeleteSessionMapping(r.Context(), memberID, req.SessionID); err != nil {
+		log.Printf("[ChatHandler] DeleteSession error: %v", err)
 		chatWriteError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

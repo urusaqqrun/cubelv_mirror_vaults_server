@@ -97,6 +97,22 @@ func (s *PgStore) AddSessionMapping(ctx context.Context, memberID, sessionID, ti
 	return nil
 }
 
+// DeleteSessionMapping deletes a single session and its chat messages for a member.
+func (s *PgStore) DeleteSessionMapping(ctx context.Context, memberID, sessionID string) error {
+	_, err := s.db.ExecContext(ctx,
+		"DELETE FROM chat_messages WHERE session_id=$1", sessionID)
+	if err != nil {
+		return fmt.Errorf("delete chat messages for session %s: %w", sessionID, err)
+	}
+
+	_, err = s.db.ExecContext(ctx,
+		"DELETE FROM session_mapping WHERE member_id=$1 AND session_id=$2", memberID, sessionID)
+	if err != nil {
+		return fmt.Errorf("delete session mapping %s: %w", sessionID, err)
+	}
+	return nil
+}
+
 // DeleteUserSessions deletes all session mappings and associated chat messages
 // for a given member. Returns (sessionsDeleted, messagesDeleted, error).
 func (s *PgStore) DeleteUserSessions(ctx context.Context, memberID string) (int, int, error) {
