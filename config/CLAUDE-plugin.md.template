@@ -2,14 +2,24 @@
 
 你的任務是建立或修改一個 CubeLV 插件。
 
-## 參考原始碼（唯讀）
+## ⚠️ 必讀：動手之前先理解架構
 
-`{VAULT_SHARED}/plugins-src/` 包含所有內建插件原始碼和基礎設施。
+**禁止跳過這個步驟。你必須先讀完以下檔案，理解 API 後才能開始寫程式碼。**
 
-建立新插件前：
-1. 讀 `{VAULT_SHARED}/plugins-src/workspace/Plugin.ts` 了解基類 API
-2. 讀 `{VAULT_SHARED}/plugins-src/workspace/pluginSDK.ts` 了解 `window.__NC__` 暴露的 runtime API
-3. 讀 1-2 個相近的內建插件（在 `plugins/` 下）作為範例
+### 必讀檔案（按順序）
+
+1. `{VAULT_SHARED}/plugins-src/workspace/Plugin.ts` — 插件基類，理解所有可用的註冊方法
+2. `{VAULT_SHARED}/plugins-src/workspace/ReactView.tsx` — View 基類，理解 `renderComponent()` 的用法
+3. `{VAULT_SHARED}/plugins-src/workspace/pluginSDK.ts` — `window.__NC__` 暴露了哪些 API
+4. 至少讀 **1 個**相近的內建插件（在 `{VAULT_SHARED}/plugins-src/plugins/` 下），完整理解一個真實插件如何運作
+
+### 讀完後自我檢查
+
+在寫任何程式碼之前，確認你能回答：
+- `ReactView.renderComponent()` 需要回傳什麼？
+- `registerPluginClass()` 要在哪裡呼叫？
+- `ensureLeafInPane()` 的參數是什麼？
+- 如何存取宿主的 React？（答案：`window.__NC__.React`，不是 `import`）
 
 ## 插件結構
 
@@ -131,6 +141,25 @@ plugins/pomodoro/styles.css        ← 樣式
 - CSS class 用插件名稱前綴避免衝突
 - **禁止**在 `plugins/` 以外的目錄寫入任何檔案
 - 有 i18n 需求時在 `registerPluginClass` 第三參數加 `setupI18n`
+
+## React 程式碼品質（嚴格遵守）
+
+1. **所有 `.map()` 渲染的元素必須加 `key` prop** — 用唯一 id，不要用 index（除非是靜態列表）
+2. **CSS 全部用 inline style 或寫在單獨的 CSS string** — 不要用 CSS modules（bundle 不支援）
+3. **useState 的初始值型別必須正確** — `useState<number>(0)` 不要寫 `useState(null)`
+4. **不要用 useEffect 裡的 async** — 用 IIFE 包裝：`useEffect(() => { (async () => { ... })(); }, [])`
+5. **所有 SVG 元素的子元素也要加 key** — `<circle>`、`<rect>` 在 `.map()` 裡一樣要 key
+6. **插件 CSS class 必須用插件名稱前綴** — 如 `.pomodoro-container` 而非 `.container`
+7. **onunload() 必須清理所有 DOM 副作用** — 插入的 `<style>` 元素、event listener 等
+
+## 交付前自我驗證
+
+寫完程式碼後，逐項檢查：
+- [ ] `registerPluginClass()` 在檔案末尾被呼叫
+- [ ] 所有 `.map()` 的 JSX 都有 `key`
+- [ ] 沒有用 `import React` — 用 `window.__NC__.React`
+- [ ] `onunload()` 清理了 `onload()` 插入的所有東西
+- [ ] CSS class 有插件名稱前綴，不會跟其他插件衝突
 
 ## 安全限制
 
