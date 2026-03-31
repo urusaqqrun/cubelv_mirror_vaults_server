@@ -441,13 +441,8 @@ func (h *WsHandler) handleMessage(session *WsSession, sessionKey string, msg map
 	handleStart := time.Now()
 	log.Printf("[CacheProfile] handleMessage START — member=%s session=%s", session.memberID, session.sessionID)
 
-	// 確保 session mapping 存在（用空 title，之後 AI 生成標題時會更新）
-	// 這樣前端 syncSessions 就能看到這個 session，不會誤刪
-	if err := h.chatStore.AddSessionMapping(context.Background(), session.memberID, session.sessionID, "", session.mode); err != nil {
-		log.Printf("[SessionMapping] EnsureMapping FAILED — sessionID=%s, err=%v", session.sessionID, err)
-	} else {
-		log.Printf("[SessionMapping] EnsureMapping OK — sessionID=%s, member=%s", session.sessionID, session.memberID)
-	}
+	// 立刻生成 title（不等 AI 回覆）
+	go h.generateTitleFromUserMessage(session, msg)
 
 	if err := h.checkCredits(session.memberID); err != nil {
 		session.Send(map[string]interface{}{
@@ -1061,10 +1056,7 @@ sendAndProcess:
 			}
 		}
 
-		// 10. Generate session title (fire-and-forget)
-		if !noSave {
-			h.maybeGenerateTitle(session, messageText, accumulatedText)
-		}
+		// 10. title 已在 handleMessage 開頭生成，這裡不再呼叫
 	}()
 }
 
@@ -1738,6 +1730,97 @@ func (h *WsHandler) maybeGenerateTitle(session *WsSession, userMsg, assistantMsg
 		return
 	}
 	log.Printf("[SessionMapping] AddSessionMapping OK — sessionID=%s", session.sessionID)
+
+	session.Send(map[string]interface{}{
+		"type":       "session_title_update",
+		"memberID":   session.memberID,
+		"session_id": session.sessionID,
+		"title":      result.Title,
+	})
+}
+
+// generateTitleFromUserMessage 在 user 發訊息時立刻生成 title
+func (h *WsHandler) generateTitleFromUserMessage(session *WsSession, msg map[string]interface{}) {
+	// 先確保 session mapping 存在（用空 title）
+	if err := h.chatStore.AddSessionMapping(context.Background(), session.memberID, session.sessionID, "", session.mode); err != nil {
+		log.Printf("[SessionMapping] EnsureMapping FAILED — sessionID=%s, err=%v", session.sessionID, err)
+		return
+	}
+	log.Printf("[SessionMapping] EnsureMapping OK — sessionID=%s, member=%s", session.sessionID, session.memberID)
+
+	// 檢查是否第一輪對話
+	msgs, _, err := h.chatStore.GetMessagesAfter(context.Background(), session.sessionID, session.mode, "", 5)
+	if err != nil {
+		log.Printf("[SessionMapping] GetMessagesAfter error — sessionID=%s, err=%v", session.sessionID, err)
+		return
+	}
+	if len(msgs) > 1 {
+		log.Printf("[SessionMapping] skip title — sessionID=%s, msgCount=%d (not first message)", session.sessionID, len(msgs))
+		return
+	}
+
+	// 取得 user message
+	messageText, _ := msg["message"].(string)
+	if messageText == "" {
+		if msgObj, ok := msg["message"].(map[string]interface{}); ok {
+			messageText, _ = msgObj["content"].(string)
+		}
+	}
+	if messageText == "" {
+		return
+	}
+
+	// 呼叫 AI 生成 title
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	aiServiceURL := os.Getenv("AI_SERVICE_URL")
+	if aiServiceURL == "" {
+		aiServiceURL = "http://chatbot.svc.local:8000"
+	}
+
+	titleLang := session.lang
+	if titleLang == "" {
+		titleLang = "繁體中文"
+	}
+	reqBody, _ := json.Marshal(map[string]interface{}{
+		"userMessage":      messageText,
+		"assistantMessage": "",
+		"lang":             titleLang,
+	})
+
+	req, err := http.NewRequestWithContext(ctx, "POST", aiServiceURL+"/cubelv/generate_thread_title", bytes.NewReader(reqBody))
+	if err != nil {
+		log.Printf("[SessionMapping] title request error — sessionID=%s, err=%v", session.sessionID, err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	log.Printf("[SessionMapping] calling ai-service for title (user msg only) — sessionID=%s", session.sessionID)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Printf("[SessionMapping] title API FAILED — sessionID=%s, err=%v", session.sessionID, err)
+		return
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Title string `json:"title"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		log.Printf("[SessionMapping] title JSON decode error — sessionID=%s, err=%v", session.sessionID, err)
+		return
+	}
+	if result.Title == "" {
+		log.Printf("[SessionMapping] title is empty — sessionID=%s", session.sessionID)
+		return
+	}
+
+	log.Printf("[SessionMapping] AddSessionMapping — sessionID=%s, title=%s", session.sessionID, result.Title)
+	if err := h.chatStore.AddSessionMapping(context.Background(), session.memberID, session.sessionID, result.Title, session.mode); err != nil {
+		log.Printf("[SessionMapping] AddSessionMapping FAILED — sessionID=%s, err=%v", session.sessionID, err)
+		return
+	}
 
 	session.Send(map[string]interface{}{
 		"type":       "session_title_update",
