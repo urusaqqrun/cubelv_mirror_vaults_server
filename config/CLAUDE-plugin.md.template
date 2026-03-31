@@ -6,6 +6,7 @@
 
 - 用戶訊息第一行會明確給你目標目錄，例如：`插件目錄名稱：plugins/番茄鐘插件-cd1677/`
 - **必須使用系統提供的目錄名，不得自行改目錄名、另建第二個插件目錄、或把檔案寫到其他名稱的目錄**
+- **直接 `mkdir -p <目標目錄>` 建立目錄**，不要浪費工具呼叫去 ls / pwd / glob 檢查目錄是否存在
 - 在寫任何檔案前，先自行選定一個固定的 **ASCII `codeStem`**
 - `codeStem` 只可使用英文字母、數字、連字號，整個插件都必須固定使用同一個 `codeStem`
 - `codeStem` 用途必須統一：
@@ -70,6 +71,7 @@
 - 若需要第二種掛載方式，必須是明確的次要入口，且要有實際觸發來源，不可「先註冊再說」
 - 若插件擁有自己的畫面，通常要搭配清楚的觸發鏈路：sidebar / command / navigation → `ensureMounted()` → `registerView`
 - 若插件是猴子補丁 / 注入型 UI，通常不應搶占 center pane
+- **每個插件都必須有至少一個「使用者不需要記快捷鍵就能操作」的可見入口**。如果主要是 overlay，至少要搭配 `registerSidebarSection` 或一個常駐 FAB 按鈕。只有 `addCommand` 快捷鍵而沒有其他入口是不合格的。
 
 ## Plugin 基類 API
 
@@ -153,8 +155,9 @@ private ensureMounted() {
 - `registerView` 之後什麼都不做，View 永遠不會顯示
 - 擁有畫面的插件不訂閱 `useSelectedItemsStore`，不知道什麼時候該掛載
 - 寫死 item ID / memberID / folderID / plugin ID
-- `registerOverlay` 但沒有任何按鈕、命令、或入口去觸發它
+- `registerOverlay` 但沒有任何**可見的**觸發入口（只有 `addCommand` 快捷鍵不算可見入口）
 - 靜態 CSS 用手動 `<style>` 注入
+- 整個插件載入後 UI 完全不可見 — 至少要有 sidebar section、FAB 按鈕、或其他常駐可見元素
 
 ## 檔案結構（必須拆分，禁止全部塞進一個檔案）
 
@@ -198,7 +201,18 @@ import './pomodoro.css';
 - 所有檔案寫在**系統提供的目標目錄**內
 - 不得改動、重命名、搬移系統提供的插件目錄
 - 元件名、檔名 stem、CSS prefix、localStorage key 一律使用同一個 `codeStem`
-- 入口檔案末尾必須呼叫 `registerPluginClass(MyPlugin, '名稱')`
+- 入口檔案末尾必須呼叫 `registerPluginClass(MyPlugin, '名稱', options)`，**options 必須包含 `descriptionKey` 和 `setupI18n`**：
+```typescript
+import { registerPluginClass, registerPluginLocales } from '@cubelv/sdk';
+registerPluginClass(PomodoroPlugin, '番茄鐘', {
+    descriptionKey: 'pluginPomodoroDesc',
+    setupI18n: () => registerPluginLocales('PomodoroPlugin', {
+        'zh-Hant': { pluginPomodoroDesc: '25 分鐘專注計時，搭配短休息與長休息循環' },
+        'en': { pluginPomodoroDesc: '25-min focus timer with short/long break cycles' },
+    }),
+});
+```
+  `descriptionKey` 會顯示在「插件管理面板」的插件說明區域，**不寫的話使用者看到的插件列表就沒有任何說明**
 - 一般樣式一律使用 `import './x.css'`
 - **不要手動注入 `<style>`**，除非樣式內容是在執行期動態生成；若真的手動插入，必須在 `onunload()` 清理
 - CSS class 用 `codeStem` 當前綴，例如 `.pomodoro-timer`
@@ -223,6 +237,7 @@ import './pomodoro.css';
 - 靜態 CSS 都是透過 `import './x.css'`
 - 只寫入系統指定的插件目錄
 - 掛載方式有且只有一個主要入口，次要入口都有明確觸發來源
+- 有至少一個不依賴快捷鍵的可見入口**（sidebar section、FAB 按鈕等），使用者能直接看到並操作
 
 ## 安全限制
 

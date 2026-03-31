@@ -43,13 +43,14 @@ const (
 )
 
 type sessionOperation struct {
-	id          string
-	kind        sessionOperationKind
-	toolCallID  string
-	ctx         context.Context
-	cancel      context.CancelFunc
-	interruptFn func()
-	cancelOnce  sync.Once
+	id               string
+	kind             sessionOperationKind
+	toolCallID       string
+	ctx              context.Context
+	cancel           context.CancelFunc
+	interruptFn      func()
+	cancelOnce       sync.Once
+	skipOnDisconnect bool // true = WS 斷線時不取消（forge 背景繼續）
 }
 
 func newSessionOperation(kind sessionOperationKind, id, toolCallID string, interruptFn func()) *sessionOperation {
@@ -58,12 +59,13 @@ func newSessionOperation(kind sessionOperationKind, id, toolCallID string, inter
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &sessionOperation{
-		id:          id,
-		kind:        kind,
-		toolCallID:  toolCallID,
-		ctx:         ctx,
-		cancel:      cancel,
-		interruptFn: interruptFn,
+		id:               id,
+		kind:             kind,
+		toolCallID:       toolCallID,
+		ctx:              ctx,
+		cancel:           cancel,
+		interruptFn:      interruptFn,
+		skipOnDisconnect: false,
 	}
 }
 
@@ -143,15 +145,33 @@ func (s *WsSession) interruptCLI() bool {
 	return true
 }
 
+// interruptActiveOperations 中斷活躍作業（WS 斷線時呼叫，跳過 skipOnDisconnect 的作業）
 func (s *WsSession) interruptActiveOperations() (hasChat bool, count int) {
+	ops := s.activeOperations()
+	for _, op := range ops {
+		if op.skipOnDisconnect {
+			continue
+		}
+		if op.kind == sessionOperationKindChat {
+			hasChat = true
+		}
+		op.Interrupt()
+		count++
+	}
+	return hasChat, count
+}
+
+// interruptAllOperations 強制中斷所有作業（使用者明確中斷時呼叫）
+func (s *WsSession) interruptAllOperations() (hasChat bool, count int) {
 	ops := s.activeOperations()
 	for _, op := range ops {
 		if op.kind == sessionOperationKindChat {
 			hasChat = true
 		}
 		op.Interrupt()
+		count++
 	}
-	return hasChat, len(ops)
+	return hasChat, count
 }
 
 // SnapshotStore DB-based vault snapshot CRUD.
@@ -177,14 +197,15 @@ type cachedSnapshot struct {
 
 // WsHandler is the WebSocket endpoint handler.
 type WsHandler struct {
-	chatStore     ChatStore
-	snapshotStore SnapshotStore
-	itemWriter    executor.DataWriter
-	vaultRoot     string
-	vaultFS       mirror.VaultFS
-	sessions      sync.Map // sessionKey -> *WsSession
-	cliPool       sync.Map // memberID -> *warmCLI (warmup pool)
-	snapCache     sync.Map // memberID -> *cachedSnapshot
+	chatStore          ChatStore
+	snapshotStore      SnapshotStore
+	itemWriter         executor.DataWriter
+	vaultRoot          string
+	vaultFS            mirror.VaultFS
+	sessions           sync.Map // sessionKey -> *WsSession
+	cliPool            sync.Map // memberID -> *warmCLI (warmup pool)
+	snapCache          sync.Map // memberID -> *cachedSnapshot
+	pendingForgeResult sync.Map // memberID -> map[string]interface{} (forge 背景完成後的待交付結果)
 }
 
 // NewWsHandler creates a new WsHandler.
@@ -400,6 +421,15 @@ func (h *WsHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		"type":      "connected",
 		"sessionId": sessionKey,
 	})
+
+	// 交付背景 forge 完成的待交付結果
+	if pending, ok := h.pendingForgeResult.LoadAndDelete(memberID); ok {
+		if msg, ok := pending.(map[string]interface{}); ok {
+			log.Printf("[PluginForge] delivering pending forge result to reconnected member %s", memberID)
+			session.Send(msg)
+			session.Send(map[string]interface{}{"type": "vault_changed"})
+		}
+	}
 
 	isNew := q.Get("isNew") == "true"
 
@@ -1524,7 +1554,7 @@ func (h *WsHandler) buildResumeHistoryContext(sessionID, mode string) string {
 }
 
 func (h *WsHandler) handleInterrupt(session *WsSession) {
-	hasChat, opCount := session.interruptActiveOperations()
+	hasChat, opCount := session.interruptAllOperations()
 	if opCount == 0 && session.interruptCLI() {
 		hasChat = true
 	}
@@ -1612,40 +1642,65 @@ func (h *WsHandler) executePluginForge(session *WsSession, memberID, forgeTitle,
 		}
 	}
 
+	// forge 使用獨立 context：WS 斷線不會取消，只有使用者明確中斷或 15 分鐘超時才會取消
+	forgeCtx, forgeCancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer forgeCancel()
+
 	var forgeOp *sessionOperation
 	if session != nil {
-		forgeOp = newSessionOperation(sessionOperationKindPluginForge, "", toolCallID, nil)
+		forgeOp = newSessionOperation(sessionOperationKindPluginForge, "", toolCallID, forgeCancel)
+		forgeOp.skipOnDisconnect = true
 		session.registerOperation(forgeOp)
 		defer session.unregisterOperation(forgeOp.id)
 	}
 
-	baseCtx := context.Background()
-	if forgeOp != nil {
-		baseCtx = forgeOp.ctx
-	}
-
 	cancelledResult := func() map[string]interface{} {
+		reason := "已中斷"
+		if errors.Is(forgeCtx.Err(), context.DeadlineExceeded) {
+			reason = "forge timeout (15 min)"
+			log.Printf("[PluginForge] ⚠ forge 超過 15 分鐘 timeout，被強制結束")
+		} else {
+			log.Printf("[PluginForge] forge 被使用者中斷")
+		}
 		sendWS(map[string]interface{}{
 			"type":    "sub_agent_complete",
 			"status":  "cancelled",
-			"message": "已中斷",
+			"message": reason,
 		})
 		return map[string]interface{}{
 			"status":  "cancelled",
-			"message": "已中斷",
+			"message": reason,
 		}
 	}
 
 	checkForgeContext := func() map[string]interface{} {
-		err := baseCtx.Err()
+		err := forgeCtx.Err()
 		if err == nil {
 			return nil
 		}
-		if errors.Is(err, context.Canceled) {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return cancelledResult()
 		}
 		return nil
 	}
+
+	// keepalive goroutine：定期送心跳防止 WS 閒置斷線
+	keepaliveDone := make(chan struct{})
+	defer close(keepaliveDone)
+	go func() {
+		ticker := time.NewTicker(20 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				sendWS(map[string]interface{}{"type": "sub_agent_intent", "step": "forge_heartbeat"})
+			case <-keepaliveDone:
+				return
+			case <-forgeCtx.Done():
+				return
+			}
+		}
+	}()
 
 	sendWS(map[string]interface{}{"type": "sub_agent_start", "title": forgeTitle})
 
@@ -1669,7 +1724,7 @@ func (h *WsHandler) executePluginForge(session *WsSession, memberID, forgeTitle,
 	userPromptFull := fmt.Sprintf("插件目錄名稱：plugins/%s/\n用戶需求：%s", cleanDir, userPrompt)
 	workDir := filepath.Join(vaultRoot, memberID)
 
-	// 清理舊的失敗插件目錄（有 main.tsx 但沒有 *Plugin.tsx 且沒有 bundle.js 的目錄）
+	// 清理舊的未完成 forge 目錄（沒有 bundle.js 的插件目錄 = forge 沒跑完）
 	pluginsRoot := filepath.Join(workDir, "plugins")
 	if dirEntries, err := os.ReadDir(pluginsRoot); err == nil {
 		for _, de := range dirEntries {
@@ -1678,23 +1733,19 @@ func (h *WsHandler) executePluginForge(session *WsSession, memberID, forgeTitle,
 			}
 			subDir := filepath.Join(pluginsRoot, de.Name())
 			files, _ := os.ReadDir(subDir)
-			hasPluginTsx := false
 			hasBundleJS := false
-			hasMainTsx := false
+			hasSourceFiles := false
 			for _, f := range files {
 				name := f.Name()
-				if strings.HasSuffix(name, "Plugin.tsx") {
-					hasPluginTsx = true
-				}
 				if name == "bundle.js" {
 					hasBundleJS = true
 				}
-				if name == "main.tsx" {
-					hasMainTsx = true
+				if strings.HasSuffix(name, ".tsx") || strings.HasSuffix(name, ".ts") || strings.HasSuffix(name, ".css") {
+					hasSourceFiles = true
 				}
 			}
-			if hasMainTsx && !hasPluginTsx && !hasBundleJS {
-				log.Printf("[PluginForge] cleanup stale dir: %s", de.Name())
+			if hasSourceFiles && !hasBundleJS {
+				log.Printf("[PluginForge] cleanup incomplete forge dir: %s", de.Name())
 				os.RemoveAll(subDir)
 			}
 		}
@@ -1702,8 +1753,6 @@ func (h *WsHandler) executePluginForge(session *WsSession, memberID, forgeTitle,
 
 	sendWS(map[string]interface{}{"type": "sub_agent_intent", "step": "forge_init"})
 
-	ctx, cancel := context.WithTimeout(baseCtx, 10*time.Minute)
-	defer cancel()
 	if result := checkForgeContext(); result != nil {
 		return result
 	}
@@ -1727,7 +1776,7 @@ func (h *WsHandler) executePluginForge(session *WsSession, memberID, forgeTitle,
 		log.Printf("[PluginForge] system-prompt preview: %s...", instructions[:200])
 	}
 
-	cmd := executor.NewClaudeCmdExported(ctx, workDir, "plugin", memberID, args)
+	cmd := executor.NewClaudeCmdExported(forgeCtx, workDir, "plugin", memberID, args)
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
 		sendWS(map[string]interface{}{"type": "sub_agent_complete", "status": "error", "error": err.Error()})
@@ -1857,7 +1906,7 @@ func (h *WsHandler) executePluginForge(session *WsSession, memberID, forgeTitle,
 	log.Printf("[PluginForge] === SUB-AGENT STREAM END === total events=%d", eventCount)
 
 	if waitErr := cmd.Wait(); waitErr != nil {
-		if errors.Is(ctx.Err(), context.Canceled) {
+		if errors.Is(forgeCtx.Err(), context.Canceled) || errors.Is(forgeCtx.Err(), context.DeadlineExceeded) {
 			return cancelledResult()
 		}
 		log.Printf("[PluginForge] sub-agent exited with error: %v", waitErr)
@@ -1910,7 +1959,7 @@ func (h *WsHandler) executePluginForge(session *WsSession, memberID, forgeTitle,
 	pluginAbsDir := filepath.Join(workDir, "plugins", pluginDir)
 	pkgJSONPath := filepath.Join(pluginAbsDir, "package.json")
 	if _, statErr := os.Stat(pkgJSONPath); statErr == nil {
-		npmCmd := exec.CommandContext(ctx, "npm", "install", "--production", "--no-audit", "--no-fund")
+		npmCmd := exec.CommandContext(forgeCtx, "npm", "install", "--production", "--no-audit", "--no-fund")
 		npmCmd.Dir = pluginAbsDir
 		npmOut, npmErr := npmCmd.CombinedOutput()
 		if npmErr != nil {
@@ -1926,11 +1975,11 @@ func (h *WsHandler) executePluginForge(session *WsSession, memberID, forgeTitle,
 	// esbuild 打包（只 external 共享模組，第三方庫打包進 bundle）
 	entryPath := filepath.Join(pluginAbsDir, entryFile)
 	bundlePath := filepath.Join(workDir, "plugins", pluginDir, "bundle.js")
-	esbuildCmd := exec.CommandContext(ctx, "node", "/app/config/esbuild-plugin-bundle.mjs",
+	esbuildCmd := exec.CommandContext(forgeCtx, "node", "/app/config/esbuild-plugin-bundle.mjs",
 		entryPath, bundlePath)
 	esbuildOut, esbuildErr := esbuildCmd.CombinedOutput()
 	if esbuildErr != nil {
-		if errors.Is(ctx.Err(), context.Canceled) {
+		if errors.Is(forgeCtx.Err(), context.Canceled) || errors.Is(forgeCtx.Err(), context.DeadlineExceeded) {
 			return cancelledResult()
 		}
 		errMsg := fmt.Sprintf("esbuild 編譯失敗: %s", string(esbuildOut))
@@ -1987,9 +2036,18 @@ func (h *WsHandler) executePluginForge(session *WsSession, memberID, forgeTitle,
 		log.Printf("[PluginForge] failed to write PLUGIN json to vault: %v", writeErr)
 	}
 
-	sendWS(map[string]interface{}{"type": "sub_agent_complete", "status": "success", "title": forgeTitle,
-		"plugin": map[string]interface{}{"id": pluginID, "pluginDir": pluginDir, "bundleHash": bundleHash}})
+	completeMsg := map[string]interface{}{"type": "sub_agent_complete", "status": "success", "title": forgeTitle,
+		"plugin": map[string]interface{}{"id": pluginID, "pluginDir": pluginDir, "bundleHash": bundleHash}}
+	sendWS(completeMsg)
 	sendWS(map[string]interface{}{"type": "vault_changed"})
+
+	// 若 WS 已斷線，儲存結果供使用者 reconnect 時交付
+	if session != nil {
+		if err := session.Send(map[string]interface{}{"type": "ping"}); err != nil {
+			log.Printf("[PluginForge] WS disconnected, storing pending result for member %s", memberID)
+			h.pendingForgeResult.Store(memberID, completeMsg)
+		}
+	}
 
 	return map[string]interface{}{
 		"status": "success", "title": forgeTitle,
