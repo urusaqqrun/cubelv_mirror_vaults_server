@@ -60,18 +60,15 @@
 
 在寫任何檔案前，先根據需求選定**一個主要掛載方式**：
 
-- `registerSidebarSection`：需要在側欄提供主要入口
-- `registerView`：插件擁有自己的 pane / center view
+- **`registerSidebarWithView`（首選）**：插件有自己的畫面且需要 sidebar 入口 — **一次呼叫完成 sidebar + view + 導航 + pane 掛載**
 - `registerOverlay`：插件主要是對話框、選單、浮層
 - `addCommand`：插件主要是指令或快捷鍵觸發
 - `registerWindowView`：插件主要是在獨立視窗開啟
 
 規則：
-- **先選一個主要掛載方式，避免同時亂註冊多種入口當保險**
-- 若需要第二種掛載方式，必須是明確的次要入口，且要有實際觸發來源，不可「先註冊再說」
-- 若插件擁有自己的畫面，通常要搭配清楚的觸發鏈路：sidebar / command / navigation → `ensureMounted()` → `registerView`
+- **有自己畫面的插件必須用 `registerSidebarWithView`**，禁止手動拆開成 registerView + registerSidebarSection + subscribe + ensureMounted
 - 若插件是猴子補丁 / 注入型 UI，通常不應搶占 center pane
-- **每個插件都必須有至少一個「使用者不需要記快捷鍵就能操作」的可見入口**。如果主要是 overlay，至少要搭配 `registerSidebarSection` 或一個常駐 FAB 按鈕。只有 `addCommand` 快捷鍵而沒有其他入口是不合格的。
+- **每個插件都必須有至少一個「使用者不需要記快捷鍵就能操作」的可見入口**。如果主要是 overlay，至少要搭配 sidebar section 或一個常駐 FAB 按鈕。只有 `addCommand` 快捷鍵而沒有其他入口是不合格的。
 
 ## Plugin 基類 API
 
@@ -79,11 +76,12 @@
 
 | 方法 | 用途 |
 |------|------|
-| `registerView(type, creator)` | 註冊 View 類型 |
+| **`registerSidebarWithView(config)`** | **一次完成 sidebar + view + 導航 + pane 掛載（首選）** |
+| `registerView(type, creator)` | 註冊 View 類型（低階，通常不直接用） |
 | `registerOverlay(id, Component)` | 註冊全局浮動元件（dialog / menu） |
 | `registerWindowView(itemType, viewType, opts, onOpen?)` | 宣告 itemType 可開獨立視窗 |
 | `registerEditorExtension(id, ext)` | 註冊 TipTap 編輯器擴展 |
-| `registerSidebarSection(desc)` | 註冊側欄區塊 |
+| `registerSidebarSection(desc)` | 註冊側欄區塊（低階，通常不直接用） |
 | `registerSearchProvider(itemType, provider)` | 註冊搜尋 |
 | `registerItemFields(itemType, ext)` | 擴展 itemType schema 欄位 |
 | `registerAIHints(itemType, hints)` | 註冊 AI 操作提示 |
@@ -111,49 +109,58 @@
 - **雙欄插件**（note, todo, chart）：`centerPane1` 放列表，`centerPane2` 放編輯器/詳情
 - **單欄插件**（card, auto-task）：`clearPane('centerPane1')` 清空列表區，`centerPane2` 放主視圖
 
-### 觸發鏈路
+### registerSidebarWithView — 有畫面的插件必用
 
-光 `registerView` 不夠，View 不會自己出現。完整流程：
+一次呼叫完成 sidebar + view 註冊 + 導航訂閱 + pane 掛載，不需要手動串接：
 
 ```typescript
-// 1. 註冊 View 類型
-this.registerView('my-list', (leaf) => new MyListView(leaf));
-this.registerView('my-detail', (leaf) => new MyDetailView(leaf));
-
-// 2. 註冊 Sidebar 區塊（讓用戶在側欄看到入口）
-this.registerSidebarSection({
-    id: 'my-plugin',
-    title: '我的插件',
-    orderAt: 600,
-    useData: useMyPluginSidebarData,
+// 雙欄範例（列表 + 詳情）
+this.registerSidebarWithView({
+    sidebar: {
+        id: 'my-plugin',
+        title: i18n.t('myPlugin'),
+        orderAt: 600,
+        useData: useMyPluginSidebarData,
+    },
+    views: [
+        { type: 'my-list', creator: (leaf) => new ReactView(leaf, MyList) },
+        { type: 'my-detail', creator: (leaf) => new ReactView(leaf, MyDetail) },
+    ],
+    activateOnItemTypes: ['MY_PLUGIN_FOLDER'],
+    panes: {
+        centerPane1: { leafId: 'leaf-mylist', viewType: 'my-list', size: 350, minSize: 240 },
+        centerPane2: { leafId: 'leaf-mydetail', viewType: 'my-detail', flex: 1, minSize: 360 },
+    },
 });
 
-// 3. 訂閱導航，自治掛載
-this.register(useSelectedItemsStore.subscribe((state) => {
-    const last = state.path.at(-1);
-    const shouldShow = last?.itemType === 'MY_TYPE';
-    if (shouldShow) this.ensureMounted();
-}));
-
-// 4. ensureMounted 把 View 放進 pane
-private ensureMounted() {
-    this.ensureLeafInPane('centerPane1', 'leaf-mylist', 'my-list', {
-        size: 350, minSize: 240,
-    });
-    this.ensureLeafInPane('centerPane2', 'leaf-mydetail', 'my-detail', {
-        flex: 1, minSize: 360,
-    });
-}
+// 單欄範例（僅主視圖）
+this.registerSidebarWithView({
+    sidebar: {
+        id: 'pomodoro',
+        title: i18n.t('pomodoro'),
+        orderAt: 700,
+        useData: usePomodoroSidebarData,
+    },
+    views: [
+        { type: 'pomodoro-timer', creator: (leaf) => new ReactView(leaf, PomodoroTimer) },
+    ],
+    activateOnItemTypes: ['POMODORO_FOLDER'],
+    panes: {
+        centerPane1: 'clear',
+        centerPane2: { leafId: 'leaf-pomodoro', viewType: 'pomodoro-timer', flex: 1, minSize: 360 },
+    },
+});
 ```
 
-**關鍵邏輯：** 用戶在 sidebar 點擊項目 → `useSelectedItemsStore` 的 `path` 改變 → 你的 subscribe 判斷 `shouldShow` → 呼叫 `ensureMounted()` → centerPane1/centerPane2 替換成你的 View。
+**自動行為：** 用戶點擊 sidebar item → `activateOnItemTypes` 匹配 → 自動把 View 掛到指定 pane。不需要手動寫 `subscribe`、`ensureMounted`、`ensureLeafInPane`。
 
-**注意：** 以上流程適用於「擁有自己畫面」的插件（note, todo, chart 類型）。猴子補丁類插件（如 classify）不搶 center pane，改用 `MutationObserver` + `createPortal` 注入 UI 到其他插件的 DOM，不需要 `registerSidebarSection` 和 `ensureLeafInPane`。
+**useData hook 的 sidebar item 規範：** 所有 item 的 `itemType` 必須以 `_FOLDER` 結尾（如 `POMODORO_FOLDER`），否則不會在 sidebar 顯示。
+
+**注意：** 猴子補丁類插件（如 classify）不搶 center pane，改用 `MutationObserver` + `createPortal` 注入 UI，不需要 `registerSidebarWithView`。
 
 ### 常見錯誤（禁止）
 
-- `registerView` 之後什麼都不做，View 永遠不會顯示
-- 擁有畫面的插件不訂閱 `useSelectedItemsStore`，不知道什麼時候該掛載
+- 手動拆開寫 `registerView` + `registerSidebarSection` + `subscribe` + `ensureMounted` — 必須用 `registerSidebarWithView`
 - 寫死 item ID / memberID / folderID / plugin ID
 - `registerOverlay` 但沒有任何**可見的**觸發入口（只有 `addCommand` 快捷鍵不算可見入口）
 - 靜態 CSS 用手動 `<style>` 注入
@@ -236,8 +243,8 @@ registerPluginClass(PomodoroPlugin, '番茄鐘', {
 - 沒有 `// =====` 這類 banner 註解
 - 靜態 CSS 都是透過 `import './x.css'`
 - 只寫入系統指定的插件目錄
-- 掛載方式有且只有一個主要入口，次要入口都有明確觸發來源
-- 有至少一個不依賴快捷鍵的可見入口**（sidebar section、FAB 按鈕等），使用者能直接看到並操作
+- 有畫面的插件使用了 `registerSidebarWithView`，沒有手動寫 subscribe + ensureMounted
+- 有至少一個不依賴快捷鍵的可見入口（sidebar section、FAB 按鈕等），使用者能直接看到並操作
 
 ## 安全限制
 
