@@ -1714,7 +1714,7 @@ func (h *WsHandler) executePluginForge(session *WsSession, memberID, forgeTitle,
 		"--verbose",
 		"--model", "claude-opus-4-6",
 		"--dangerously-skip-permissions",
-		"--mcp-config", "/home/mirror/.claude/settings.json",
+		"--mcp-config", "/app/config/claude-forge-settings.json",
 		"--system-prompt", instructions,
 		"-p", userPromptFull,
 	}

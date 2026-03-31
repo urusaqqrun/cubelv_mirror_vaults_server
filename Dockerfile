@@ -45,6 +45,9 @@ COPY ./entrypoint.sh /app/
 # esbuild JS API for plugin bundling (config/esbuild-plugin-bundle.mjs)
 RUN cd /app/config && npm init -y > /dev/null 2>&1 && npm install esbuild && rm -f package.json package-lock.json
 
+# 構建時下載內建插件原始碼（嵌入映像，避免運行時 DNS 解析問題）
+RUN curl -fsSL "https://cubelv.com/app/plugins-src.tar.gz" -o /app/plugins-src.tar.gz || true
+
 # Claude CLI hooks 設定 + 讓所有 UID 都能讀取 CLI 設定與執行 CLI
 RUN mkdir -p /home/mirror/.claude && \
     cp /app/config/claude-hooks-settings.json /home/mirror/.claude/settings.json && \

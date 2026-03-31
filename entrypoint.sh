@@ -26,19 +26,31 @@ mkdir -p "$VAULT_ROOT/shared"
 chown root:root "$VAULT_ROOT/shared"
 chmod 755 "$VAULT_ROOT/shared"
 
-# 從 S3 (via CloudFront) 下載內建插件原始碼到 EFS shared 目錄
+# 同步內建插件原始碼到 EFS shared 目錄
+# 優先用映像內嵌的 tar（Docker build 時下載），失敗才嘗試運行時下載
 PLUGINS_SRC_URL="${PLUGINS_SRC_URL:-https://cubelv.com/app/plugins-src.tar.gz}"
 PLUGINS_DST="$VAULT_ROOT/shared/plugins-src"
-echo "下載內建插件原始碼: $PLUGINS_SRC_URL ..."
-if curl -fsSL "$PLUGINS_SRC_URL" -o /tmp/plugins-src.tar.gz; then
+EMBEDDED_TAR="/app/plugins-src.tar.gz"
+
+if [ -f "$EMBEDDED_TAR" ]; then
+  echo "使用映像內嵌的插件原始碼..."
   rm -rf "$PLUGINS_DST"
   mkdir -p "$PLUGINS_DST"
-  tar -xzf /tmp/plugins-src.tar.gz -C "$PLUGINS_DST"
+  tar -xzf "$EMBEDDED_TAR" -C "$PLUGINS_DST"
   chmod -R a+rX "$PLUGINS_DST"
-  rm -f /tmp/plugins-src.tar.gz
-  echo "✅ 內建插件原始碼同步完成"
+  echo "✅ 內建插件原始碼同步完成（from image）"
 else
-  echo "⚠️ 下載插件原始碼失敗，跳過（$PLUGINS_SRC_URL）"
+  echo "映像內無內嵌 tar，嘗試運行時下載: $PLUGINS_SRC_URL ..."
+  if curl -fsSL "$PLUGINS_SRC_URL" -o /tmp/plugins-src.tar.gz; then
+    rm -rf "$PLUGINS_DST"
+    mkdir -p "$PLUGINS_DST"
+    tar -xzf /tmp/plugins-src.tar.gz -C "$PLUGINS_DST"
+    chmod -R a+rX "$PLUGINS_DST"
+    rm -f /tmp/plugins-src.tar.gz
+    echo "✅ 內建插件原始碼同步完成（from download）"
+  else
+    echo "⚠️ 下載插件原始碼失敗，跳過（$PLUGINS_SRC_URL）"
+  fi
 fi
 
 # 打印環境配置（不包含敏感數據）
