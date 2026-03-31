@@ -82,6 +82,15 @@ func (h *ChatHandler) GetMessagesAfterCheckpoint(w http.ResponseWriter, r *http.
 	}
 
 	messages := formatMessages(rows)
+	// #region agent log
+	debugMirrorLog("api/chat_handler.go:84", "MirrorThinking-DEBUG api_get_messages_after", debugRunInitial, "H3", map[string]interface{}{
+		"sessionID":    req.SessionID,
+		"checkpointID": req.CheckpointID,
+		"messageCount": len(rows),
+		"hasPrevious":  hasPrevious,
+		"rows":         debugChatRowsSummary(rows),
+	})
+	// #endregion
 	resp := map[string]interface{}{"messages": messages}
 	if req.CheckpointID == "" {
 		hp := 0
@@ -264,4 +273,26 @@ func formatMessages(rows []database.ChatMessage) []map[string]interface{} {
 		result = append(result, msg)
 	}
 	return result
+}
+
+func debugChatRowsSummary(rows []database.ChatMessage) []map[string]interface{} {
+	if len(rows) == 0 {
+		return nil
+	}
+	start := 0
+	if len(rows) > 6 {
+		start = len(rows) - 6
+	}
+	summary := make([]map[string]interface{}, 0, len(rows)-start)
+	for _, row := range rows[start:] {
+		summary = append(summary, map[string]interface{}{
+			"id":            row.ID,
+			"role":          row.Role,
+			"contentLen":    len(row.Content),
+			"thinkingLen":   len(row.Thinking),
+			"toolCallCount": debugToolCallCount(row.ToolCalls),
+			"toolCallID":    row.ToolCallID,
+		})
+	}
+	return summary
 }

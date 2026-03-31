@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/gorilla/websocket"
@@ -366,6 +367,14 @@ func (h *WsHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 				}
 
 				rebuildStart := time.Now()
+				// #region agent log
+				debugMirrorLog("api/ws_handler.go:368", "MirrorThinking-DEBUG rebuild_session_jsonl", debugRunInitial, "H2", map[string]interface{}{
+					"sessionID":    sessionID,
+					"source":       "ws_resume_bootstrap",
+					"messageCount": len(smList),
+					"tailMessages": debugSessionMessageSummary(smList),
+				})
+				// #endregion
 				if err := executor.RebuildSessionJSONL(sessionID, workDir, memberID, smList); err != nil {
 					log.Printf("[WS] rebuild JSONL error: %v", err)
 				} else {
@@ -431,6 +440,12 @@ func (h *WsHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 func (h *WsHandler) handleMessage(session *WsSession, sessionKey string, msg map[string]interface{}) {
 	handleStart := time.Now()
 	log.Printf("[CacheProfile] handleMessage START — member=%s session=%s", session.memberID, session.sessionID)
+
+	// ★ 確保 session mapping 存在（用空 title，之後 AI 生成標題時會更新）
+	// 這樣前端 syncSessions 就能看到這個 session，不會誤刪
+	if err := h.chatStore.AddSessionMapping(context.Background(), session.memberID, session.sessionID, "", session.mode); err != nil {
+		log.Printf("[SessionMapping] EnsureMapping FAILED — sessionID=%s, err=%v", session.sessionID, err)
+	}
 
 	if err := h.checkCredits(session.memberID); err != nil {
 		session.Send(map[string]interface{}{
@@ -632,6 +647,13 @@ sendAndProcess:
 				prevTurnThinking = accumulatedThinking
 				accumulatedText = ""
 				accumulatedThinking = ""
+				// #region agent log
+				debugMirrorLog("api/ws_handler.go:631", "MirrorThinking-DEBUG message_start", debugRunInitial, "H5", map[string]interface{}{
+					"sessionID":           session.sessionID,
+					"prevTurnThinkingLen": len(prevTurnThinking),
+					"sentToolUseCount":    len(sentToolUseIDs),
+				})
+				// #endregion
 			}
 
 			if innerType == "content_block_delta" {
@@ -694,6 +716,15 @@ sendAndProcess:
 							text, _ := blockMap["thinking"].(string)
 							if text != "" && text != accumulatedThinking && text != prevTurnThinking {
 								accumulatedThinking = text
+								// #region agent log
+								debugMirrorLog("api/ws_handler.go:696", "MirrorThinking-DEBUG assistant_thinking_block", debugRunInitial, "H5", map[string]interface{}{
+									"sessionID":            session.sessionID,
+									"thinkingLen":          len(text),
+									"matchesPrevTurn":      text == prevTurnThinking,
+									"currentToolCallCount": len(accumulatedToolCalls),
+									"currentTextLen":       len(accumulatedText),
+								})
+								// #endregion
 								session.Send(map[string]interface{}{
 									"type":        "thinking_token",
 									"memberID":    session.memberID,
@@ -726,6 +757,16 @@ sendAndProcess:
 							log.Printf("[WS] forgeToolCallIDs channel full, dropping: %s", toolID)
 						}
 					}
+					// #region agent log
+					debugMirrorLog("api/ws_handler.go:729", "MirrorThinking-DEBUG assistant_tool_use", debugRunInitial, "H1", map[string]interface{}{
+						"sessionID":           session.sessionID,
+						"toolID":              toolID,
+						"toolName":            toolName,
+						"accumulatedTextLen":  len(accumulatedText),
+						"accumulatedThinkLen": len(accumulatedThinking),
+						"toolCallCount":       len(accumulatedToolCalls),
+					})
+					// #endregion
 					session.Send(map[string]interface{}{
 						"type":       "message",
 						"role":       "assistant",
@@ -740,6 +781,14 @@ sendAndProcess:
 		case eventType == "result" && subtype == "tool_result":
 			toolCallID, _ := parsed["tool_use_id"].(string)
 			toolContent, _ := parsed["content"].(string)
+			// #region agent log
+			debugMirrorLog("api/ws_handler.go:743", "MirrorThinking-DEBUG tool_result_event", debugRunInitial, "H4", map[string]interface{}{
+				"sessionID":  session.sessionID,
+				"source":     "result.tool_result",
+				"toolCallID": toolCallID,
+				"contentLen": len(toolContent),
+			})
+			// #endregion
 			session.Send(map[string]interface{}{
 				"type":         "message",
 				"role":         "tool",
@@ -767,6 +816,14 @@ sendAndProcess:
 						if blockMap["type"] == "tool_result" {
 							tcID, _ := blockMap["tool_use_id"].(string)
 							tcContent, _ := blockMap["content"].(string)
+							// #region agent log
+							debugMirrorLog("api/ws_handler.go:770", "MirrorThinking-DEBUG tool_result_event", debugRunInitial, "H4", map[string]interface{}{
+								"sessionID":  session.sessionID,
+								"source":     "user.tool_result",
+								"toolCallID": tcID,
+								"contentLen": len(tcContent),
+							})
+							// #endregion
 							session.Send(map[string]interface{}{
 								"type":         "message",
 								"role":         "tool",
@@ -919,6 +976,15 @@ sendAndProcess:
 				assistantMsg.ToolCalls = b
 			}
 		}
+		// #region agent log
+		debugMirrorLog("api/ws_handler.go:922", "MirrorThinking-DEBUG persist_assistant", debugRunInitial, "H1", map[string]interface{}{
+			"sessionID":       session.sessionID,
+			"contentLen":      len(assistantMsg.Content),
+			"thinkingLen":     len(assistantMsg.Thinking),
+			"toolCallCount":   len(accumulatedToolCalls),
+			"hasEmptyContent": assistantMsg.Content == "",
+		})
+		// #endregion
 		if err := h.chatStore.InsertChatMessage(context.Background(), assistantMsg); err != nil {
 			log.Printf("[SessionMapping] InsertChatMessage(assistant) FAILED — sessionID=%s, err=%v", session.sessionID, err)
 		} else {
@@ -1237,6 +1303,14 @@ func (h *WsHandler) rebuildSessionJSONL(session *WsSession, workDir string) {
 		})
 	}
 
+	// #region agent log
+	debugMirrorLog("api/ws_handler.go:1240", "MirrorThinking-DEBUG rebuild_session_jsonl", debugRunInitial, "H2", map[string]interface{}{
+		"sessionID":    session.sessionID,
+		"source":       "ensure_cli_rebuild",
+		"messageCount": len(smList),
+		"tailMessages": debugSessionMessageSummary(smList),
+	})
+	// #endregion
 	if err := executor.RebuildSessionJSONL(session.sessionID, workDir, session.memberID, smList); err != nil {
 		log.Printf("[WS] rebuild JSONL error for session %s: %v", session.sessionID, err)
 	} else {
@@ -1317,6 +1391,37 @@ func (h *WsHandler) handleInterrupt(session *WsSession) {
 	})
 }
 
+// sanitizePluginDir 將 forgeTitle 轉換為安全的目錄名稱
+// 保留 Unicode 字母/數字（支援中日韓等文字），空格轉連字號，加短 hash 防碰撞
+func sanitizePluginDir(title string) string {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return fmt.Sprintf("plugin-%x", sha256.Sum256([]byte(fmt.Sprint(time.Now().UnixNano()))))[:14]
+	}
+
+	var buf strings.Builder
+	prevDash := false
+	for _, c := range title {
+		if unicode.IsLetter(c) || unicode.IsDigit(c) {
+			buf.WriteRune(c)
+			prevDash = false
+		} else if c == ' ' || c == '-' || c == '_' {
+			if !prevDash && buf.Len() > 0 {
+				buf.WriteRune('-')
+				prevDash = true
+			}
+		}
+	}
+	slug := strings.TrimRight(buf.String(), "-")
+	if slug == "" {
+		slug = "plugin"
+	}
+
+	// 加 6 字元短 hash 避免同名碰撞
+	h := sha256.Sum256([]byte(fmt.Sprintf("%s-%d", title, time.Now().UnixNano())))
+	return fmt.Sprintf("%s-%x", slug, h[:3])
+}
+
 // executePluginForge 啟動插件鍛造 Sub-Agent（同步阻塞到完成）
 // session 可為 nil（沒有 WebSocket 時不發意圖事件）
 func (h *WsHandler) executePluginForge(session *WsSession, memberID, forgeTitle, userPrompt, toolCallID string) map[string]interface{} {
@@ -1352,17 +1457,8 @@ func (h *WsHandler) executePluginForge(session *WsSession, memberID, forgeTitle,
 
 	instructions := strings.ReplaceAll(string(pluginTemplate), "{VAULT_SHARED}", sharedDir)
 
-	// 預先推導 pluginDir 名稱給 Sub-Agent
-	suggestedDir := strings.ToLower(strings.ReplaceAll(forgeTitle, " ", "-"))
-	cleanDir := ""
-	for _, c := range suggestedDir {
-		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' {
-			cleanDir += string(c)
-		}
-	}
-	if cleanDir == "" {
-		cleanDir = "plugin"
-	}
+	// 預先推導 pluginDir 名稱給 Sub-Agent（保留 Unicode 字母/數字，加短 hash 防碰撞）
+	cleanDir := sanitizePluginDir(forgeTitle)
 
 	fullPrompt := fmt.Sprintf("%s\n\n---\n\n插件目錄名稱：plugins/%s/\n用戶需求：%s", instructions, cleanDir, userPrompt)
 	workDir := filepath.Join(vaultRoot, memberID)
