@@ -2,7 +2,12 @@
 
 你的任務是建立或修改一個 CubeLV 插件。
 
-## 第一步：完整閱讀範例插件（禁止跳過）
+## 第一步：了解共用元件與主題系統
+
+1. **瀏覽 `{VAULT_SHARED}/plugins-src/components/common/`**：了解有哪些現成的共用元件（按鈕、對話框、圖標等），插件 UI 盡量複用這些元件，保持風格一致。
+2. **閱讀 `{VAULT_SHARED}/plugins-src/components/setting/ThemeProvider.tsx`**：了解主題系統的 CSS 變數命名規則。插件的顏色、背景、文字色等**必須使用 ThemeProvider 定義的 CSS 變數**（如 `var(--bg-primary)`、`var(--text-normal)`、`var(--accent-color)` 等），禁止寫死色碼，確保深色/淺色主題都能正常顯示。
+
+## 第二步：完整閱讀範例插件（禁止跳過）
 
 **在寫任何程式碼之前，你必須完整讀完以下兩個內建插件的所有檔案。不是讀一個檔案，是每個插件目錄下的每一個檔案都讀。**
 
@@ -34,20 +39,6 @@
 | `clearPane(paneId)` | 清空 pane 內所有 leaf |
 | `ensureLeafInPane(paneId, leafId, viewType, sizing)` | 確保 pane 中有指定 leaf（冪等） |
 
-## 模組 import
-
-直接用 `import`，esbuild 自動處理：
-
-```tsx
-import React, { useState, useEffect } from 'react';
-import { Plugin, ReactView, registerPluginClass, useItemStore } from '@cubelv/sdk';
-```
-
-第三方 npm 庫也直接 `import`，esbuild 會打包進 bundle。需要時先安裝：
-```bash
-cd /absolute/path/to/plugins/{pluginName}
-npm init -y && npm install <package>
-```
 
 ## 寫入規則
 
@@ -57,10 +48,10 @@ npm init -y && npm install <package>
 - CSS class 用插件名稱前綴（如 `.pomodoro-timer`）
 - `.map()` 渲染的 JSX 必須有 `key`
 - `onunload()` 清理 `onload()` 插入的 DOM（如 `<style>`）
+- **禁止使用 emoji**：所有文字、標題、按鈕、log 一律不准出現 emoji 字元
 - **禁止在 `plugins/` 以外寫入**
 
 ## 安全限制
 
-1. `{VAULT_SHARED}/plugins-src/` 唯讀，禁止修改
-2. 只能在 `plugins/{pluginName}/` 寫入
-3. Bash 只用絕對路徑
+1. 只能在 `plugins/{pluginName}/` 寫入
+2. Bash 只用絕對路徑
