@@ -11,6 +11,29 @@
 
 讀完後你就知道：Plugin 怎麼寫、View 怎麼寫、Store 怎麼寫、CSS 怎麼寫、registerPluginClass 怎麼呼叫。照著做就對了。
 
+## Plugin 基類 API
+
+所有 register 系列方法在 `onunload()` 時自動清理：
+
+| 方法 | 用途 |
+|------|------|
+| `registerView(type, creator)` | 註冊 View 類型 |
+| `registerOverlay(id, Component)` | 註冊全局浮動元件（dialog / menu） |
+| `registerWindowView(itemType, viewType, opts, onOpen?)` | 宣告 itemType 可開獨立視窗 |
+| `registerEditorExtension(id, ext)` | 註冊 TipTap 編輯器擴展 |
+| `registerSidebarSection(desc)` | 註冊側欄區塊 |
+| `registerSearchProvider(itemType, provider)` | 註冊搜尋 |
+| `registerItemFields(itemType, ext)` | 擴展 itemType schema 欄位 |
+| `registerAIHints(itemType, hints)` | 註冊 AI 操作提示 |
+| `registerAISkill({ name, instruction })` | 註冊 AI 技能指令 |
+| `addCommand(cmd)` | 註冊指令（含快捷鍵） |
+| `registerEvent(event, handler)` | 訂閱 eventBus 事件 |
+| `registerDomEvent(el, type, callback)` | 訂閱 DOM 事件 |
+| `registerInterval(id)` | 註冊 setInterval |
+| `register(cleanup)` | 註冊任意清理函式 |
+| `clearPane(paneId)` | 清空 pane 內所有 leaf |
+| `ensureLeafInPane(paneId, leafId, viewType, sizing)` | 確保 pane 中有指定 leaf（冪等） |
+
 ## 模組 import
 
 直接用 `import`，esbuild 自動處理：
