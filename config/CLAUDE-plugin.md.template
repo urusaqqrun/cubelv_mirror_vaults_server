@@ -73,7 +73,16 @@ registerPluginClass(MyPlugin, '我的功能');
 - 插件基礎設施：`Plugin`、`ReactView`、`View`、`WorkspaceLeaf`、`registerPluginClass`、`registerPluginLocales`
 - Store：`useItemStore`、`useSelectedItemsStore`、`useDialogStore`、`useMenuStore`、`useOverlayStore`、`eventBus`
 
-**禁止使用 import 語法引入 React 或其他框架**，一律從 `window.__NC__` 取得。
+**宿主共享模組**（React、zustand、i18next、@cubelv/sdk）禁止用 import 語法，一律從 `window.__NC__` 取得。
+**第三方庫**（如 canvas-confetti、d3、chart.js 等）可直接 `import`，esbuild 會自動打包進 bundle。需要第三方庫時，在插件目錄建立 `package.json` 並執行 `npm install`：
+
+```bash
+cd /absolute/path/to/plugins/{pluginName}
+npm init -y
+npm install canvas-confetti
+```
+
+編譯前系統會自動檢測 `package.json` 並執行 `npm install`，但建議你自己先安裝以確認依賴正確。
 
 ## 數據存取
 

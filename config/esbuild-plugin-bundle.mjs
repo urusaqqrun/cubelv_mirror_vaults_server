@@ -1,7 +1,5 @@
 #!/usr/bin/env node
-// esbuild wrapper: 把所有非相對路徑的 import 都標記 external
-// 這樣 AI 不管 import 什麼（react, lodash, d3, ...），都不會讓 esbuild 報錯
-// 前端的 require shim 會負責從 window.__NC__ 解析
+// esbuild wrapper: 只 external 必須與宿主共享的模組，其餘第三方庫打包進 bundle
 
 import { build } from 'esbuild';
 
@@ -11,14 +9,29 @@ if (!entry || !outfile) {
     process.exit(1);
 }
 
-const externalAllBareImports = {
-    name: 'external-bare-imports',
+// 必須與宿主共享實例的模組（React state/hooks、store 狀態）
+const SHARED = new Set([
+    'react',
+    'react/jsx-runtime',
+    'react/jsx-dev-runtime',
+    'react-dom',
+    'react-dom/client',
+    'zustand',
+    'zustand/middleware',
+    'i18next',
+    'react-i18next',
+    '@cubelv/sdk',
+]);
+
+const externalSharedOnly = {
+    name: 'external-shared-only',
     setup(b) {
-        // 非 . 或 / 開頭的 import 都視為 external（bare specifier）
-        b.onResolve({ filter: /^[^./]/ }, (args) => ({
-            path: args.path,
-            external: true,
-        }));
+        b.onResolve({ filter: /^[^./]/ }, (args) => {
+            if (SHARED.has(args.path)) {
+                return { path: args.path, external: true };
+            }
+            return undefined;
+        });
     },
 };
 
@@ -31,7 +44,7 @@ try {
         jsx: 'automatic',
         loader: { '.tsx': 'tsx', '.ts': 'ts', '.css': 'css' },
         outfile,
-        plugins: [externalAllBareImports],
+        plugins: [externalSharedOnly],
     });
 } catch (err) {
     console.error(err.message);

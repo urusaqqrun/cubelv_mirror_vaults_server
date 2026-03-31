@@ -1493,7 +1493,21 @@ func (h *WsHandler) executePluginForge(session *WsSession, memberID, forgeTitle,
 
 	sendWS(map[string]interface{}{"type": "sub_agent_intent", "step": "forge_compile"})
 
-	// esbuild 打包（通用 external：所有 bare import 都 external，前端 require shim 解析）
+	// 如果插件目錄有 package.json，先安裝第三方依賴
+	pluginAbsDir := filepath.Join(workDir, "plugins", pluginDir)
+	pkgJSONPath := filepath.Join(pluginAbsDir, "package.json")
+	if _, statErr := os.Stat(pkgJSONPath); statErr == nil {
+		npmCmd := exec.CommandContext(ctx, "npm", "install", "--production", "--no-audit", "--no-fund")
+		npmCmd.Dir = pluginAbsDir
+		npmOut, npmErr := npmCmd.CombinedOutput()
+		if npmErr != nil {
+			log.Printf("[PluginForge] npm install failed: %s", string(npmOut))
+		} else {
+			log.Printf("[PluginForge] npm install success in %s", pluginAbsDir)
+		}
+	}
+
+	// esbuild 打包（只 external 共享模組，第三方庫打包進 bundle）
 	entryPath := filepath.Join(workDir, "plugins", pluginDir, "main.tsx")
 	bundlePath := filepath.Join(workDir, "plugins", pluginDir, "bundle.js")
 	esbuildCmd := exec.CommandContext(ctx, "node", "/app/config/esbuild-plugin-bundle.mjs",
