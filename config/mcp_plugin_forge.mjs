@@ -40,7 +40,7 @@ async function forgePlugin(args) {
       port: url.port,
       path: url.pathname,
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(postData) },
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(postData), 'X-Internal-Secret': process.env.INTERNAL_SECRET || '' },
       timeout: 0,  // 禁止 timeout
     }, (res) => {
       let body = '';
