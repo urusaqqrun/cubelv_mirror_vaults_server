@@ -1692,6 +1692,13 @@ func (h *WsHandler) executePluginForge(session *WsSession, memberID, forgeTitle,
 		}
 	}()
 
+	// Sub-Agent 模型繼承 Main Agent 的模型選擇
+	forgeModel := "claude-sonnet-4-6" // fallback
+	if session != nil && session.model != "" {
+		forgeModel = session.model
+	}
+	log.Printf("[PluginForge] using model: %s (session model: %v)", forgeModel, session != nil && session.model != "")
+
 	sendWS(map[string]interface{}{"type": "sub_agent_start", "title": forgeTitle})
 
 	vaultRoot := os.Getenv("VAULT_ROOT")
@@ -1751,7 +1758,7 @@ func (h *WsHandler) executePluginForge(session *WsSession, memberID, forgeTitle,
 		"--print",
 		"--output-format", "stream-json",
 		"--verbose",
-		"--model", "claude-sonnet-4-6",
+		"--model", forgeModel,
 		"--dangerously-skip-permissions",
 		"--mcp-config", "/app/config/claude-forge-settings.json",
 		"--system-prompt", instructions,
