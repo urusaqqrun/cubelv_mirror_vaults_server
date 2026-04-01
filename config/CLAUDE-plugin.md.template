@@ -106,8 +106,8 @@ this.registerSidebarWithView({
         useData: useMyPluginSidebarData,
     },
     views: [
-        { type: 'my-list', creator: (leaf) => new ReactView(leaf, MyList) },
-        { type: 'my-detail', creator: (leaf) => new ReactView(leaf, MyDetail) },
+        { type: 'my-list', creator: (leaf) => new MyListView(leaf) },
+        { type: 'my-detail', creator: (leaf) => new MyDetailView(leaf) },
     ],
     activateOnItemTypes: ['MY_PLUGIN_FOLDER'],
     panes: {
@@ -125,7 +125,7 @@ this.registerSidebarWithView({
         useData: usePomodoroSidebarData,
     },
     views: [
-        { type: 'pomodoro-timer', creator: (leaf) => new ReactView(leaf, PomodoroTimer) },
+        { type: 'pomodoro-timer', creator: (leaf) => new PomodoroTimerView(leaf) },
     ],
     activateOnItemTypes: ['POMODORO_FOLDER'],
     panes: {
@@ -133,6 +133,15 @@ this.registerSidebarWithView({
         centerPane2: { leafId: 'leaf-pomodoro', viewType: 'pomodoro-timer', flex: 1, minSize: 360 },
     },
 });
+```
+
+**View class 定義方式：** 繼承 `ReactView`，覆寫 `getViewType()`、`getDisplayText()`、`renderComponent()`：
+```typescript
+class MyListView extends ReactView {
+    getViewType() { return 'my-list'; }
+    getDisplayText() { return '我的列表'; }
+    renderComponent() { return <MyList />; }  // 注意是 renderComponent 不是 render
+}
 ```
 
 **自動行為：** 用戶點擊 sidebar item → `activateOnItemTypes` 匹配 → 自動把 View 掛到指定 pane。不需要手動寫 `subscribe`、`ensureMounted`、`ensureLeafInPane`。
