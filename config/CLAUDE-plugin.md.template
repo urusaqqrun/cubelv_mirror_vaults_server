@@ -169,32 +169,6 @@ class MyListView extends ReactView {
 - **Store 獨立 `.ts` 檔案**：例如 `{codeStem}Store.ts`，用 Zustand
 - 檔案命名照內建插件慣例，不要自己發明
 
-## Import 規則（寫錯就編譯失敗）
-
-**所有 CubeLV 核心模組一律從 `@cubelv/sdk` import，禁止用相對路徑。**
-
-範例插件（note/classify）是內建插件，用的是相對路徑（如 `../../../workspace/Plugin`）。你不是內建插件，你是動態插件，esbuild 只認 `@cubelv/sdk` 作為 external，相對路徑直接報 `Could not resolve`。
-
-```typescript
-// 禁止 — 相對路徑，esbuild 編譯必報錯
-import { Plugin } from '../../../workspace/Plugin';
-import { useItemStore } from '../../../Store/itemStore';
-
-// 正確 — 全部從 @cubelv/sdk import
-import {
-    Plugin, ReactView, registerPluginClass,
-    useItemStore, useSelectedItemsStore, generateObjectID,
-} from '@cubelv/sdk';
-import { create } from '@cubelv/sdk';  // zustand create
-```
-
-**只有插件自己目錄內的檔案用相對路徑：**
-```typescript
-import { usePomodoroStore } from './pomodoroStore';
-import PomodoroTimer from './PomodoroTimer';
-import './pomodoro.css';
-```
-
 ## 寫入規則
 
 - 所有檔案寫在**系統提供的目標目錄**內
@@ -228,7 +202,7 @@ registerPluginClass(PomodoroPlugin, '番茄鐘', {
 在停止前，必須自行檢查以下項目全部成立：
 
 - `registerPluginClass(...)` 已存在於入口檔
-- 所有核心 import 都來自 `@cubelv/sdk`，沒有 `../../../` 相對路徑
+- 第三方庫有寫在 package.json 的 dependencies 中
 - 沒有 `main.tsx`
 - 沒有任何 24 位 hex literal
 - 沒有 `import React from 'react'`
