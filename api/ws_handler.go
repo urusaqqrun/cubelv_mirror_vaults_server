@@ -122,46 +122,33 @@ func (h *WsHandler) HandleForgeAPI(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
-	if req.Title == "" || req.Prompt == "" || req.MemberID == "" {
-		http.Error(w, "title, prompt, memberID required", http.StatusBadRequest)
+	if req.Title == "" || req.Prompt == "" || req.MemberID == "" || req.WsSessionID == "" {
+		http.Error(w, "title, prompt, memberID, wsSessionID required", http.StatusBadRequest)
 		return
 	}
 
 	log.Printf("[ForgeAPI] received forge request: title=%q member=%s wsSession=%s", req.Title, req.MemberID, req.WsSessionID)
 
-	// 精確查找 WebSocket session（優先用 wsSessionID，fallback 用 memberID）
-	var session *WsSession
-	if req.WsSessionID != "" {
-		sessionKey := req.MemberID + ":" + req.WsSessionID
-		if val, ok := h.sessions.Load(sessionKey); ok {
-			session = val.(*WsSession)
-			log.Printf("[ForgeAPI] found session by exact key: %s", sessionKey)
-		}
+	// 精確匹配 WebSocket session（與 HandleWebSocket 中的 sessionKey 格式一致）
+	sessionKey := req.MemberID + ":" + req.WsSessionID
+	val, ok := h.sessions.Load(sessionKey)
+	if !ok {
+		log.Printf("[ForgeAPI] session not found: key=%s", sessionKey)
+		http.Error(w, "session not found", http.StatusNotFound)
+		return
 	}
-	if session == nil {
-		h.sessions.Range(func(key, value interface{}) bool {
-			if s, ok := value.(*WsSession); ok && s.memberID == req.MemberID {
-				session = s
-				return false
-			}
-			return true
-		})
-		if session != nil {
-			log.Printf("[ForgeAPI] found session by memberID fallback: %s", req.MemberID)
-		} else {
-			log.Printf("[ForgeAPI] no active WebSocket session for member %s", req.MemberID)
-		}
-	}
+	session := val.(*WsSession)
+	log.Printf("[ForgeAPI] found session: %s", sessionKey)
 
-	// 從 session 取出對應的 tool_call_id
+	// 阻塞等待 tool_call_id（主串流 tool_use 事件須先到）
 	var toolCallID string
-	if session != nil {
-		select {
-		case toolCallID = <-session.forgeToolCallIDs:
-			log.Printf("[ForgeAPI] got tool_call_id: %s", toolCallID)
-		default:
-			log.Printf("[ForgeAPI] no tool_call_id available in queue")
-		}
+	select {
+	case toolCallID = <-session.forgeToolCallIDs:
+		log.Printf("[ForgeAPI] got tool_call_id: %s", toolCallID)
+	case <-time.After(5 * time.Second):
+		log.Printf("[ForgeAPI] tool_call_id timeout for session %s", sessionKey)
+		http.Error(w, "tool_call_id not received in time", http.StatusGatewayTimeout)
+		return
 	}
 
 	// Credit check
