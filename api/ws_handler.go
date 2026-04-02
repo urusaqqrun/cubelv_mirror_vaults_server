@@ -8,7 +8,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -16,7 +15,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 	"unicode"
 
@@ -37,64 +35,20 @@ const (
 	wsWriteWait    = 10 * time.Second
 )
 
-type sessionOperationKind string
-
-const (
-	sessionOperationKindChat        sessionOperationKind = "chat"
-	sessionOperationKindPluginForge sessionOperationKind = "plugin_forge"
-)
-
-type sessionOperation struct {
-	id               string
-	kind             sessionOperationKind
-	toolCallID       string
-	ctx              context.Context
-	cancel           context.CancelFunc
-	interruptFn      func()
-	cancelOnce       sync.Once
-	skipOnDisconnect bool // true = WS 斷線時不取消（forge 背景繼續）
-}
-
-func newSessionOperation(kind sessionOperationKind, id, toolCallID string, interruptFn func()) *sessionOperation {
-	if id == "" {
-		id = fmt.Sprintf("%s-%d", kind, time.Now().UnixNano())
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	return &sessionOperation{
-		id:               id,
-		kind:             kind,
-		toolCallID:       toolCallID,
-		ctx:              ctx,
-		cancel:           cancel,
-		interruptFn:      interruptFn,
-		skipOnDisconnect: false,
-	}
-}
-
-func (op *sessionOperation) Interrupt() {
-	op.cancelOnce.Do(func() {
-		op.cancel()
-		if op.interruptFn != nil {
-			op.interruptFn()
-		}
-	})
-}
-
 // WsSession represents a single WebSocket connection session.
 type WsSession struct {
-	conn             *websocket.Conn
-	memberID         string
-	sessionID        string
-	mode             string
-	model            string
-	lang             string
-	taskID           string
-	status           string // idle, asking, interrupted
-	mu               sync.Mutex
-	cli              *executor.StreamCLI
-	done             chan struct{} // 關閉時通知心跳 goroutine 停止
-	forgeToolCallIDs chan string   // plugin forge tool_call_id queue
-	operations       map[string]*sessionOperation
+	conn      *websocket.Conn
+	memberID  string
+	sessionID string
+	mode      string
+	model     string
+	lang      string
+	taskID    string
+	status    string // idle, asking, interrupted
+	mu        sync.Mutex
+	cli       *executor.StreamCLI
+	done      chan struct{} // 關閉時通知心跳 goroutine 停止
+	forgeToolCallIDs chan string // plugin forge tool_call_id queue
 }
 
 // Send writes a JSON message to the WebSocket connection (thread-safe).
@@ -102,78 +56,6 @@ func (s *WsSession) Send(msg map[string]interface{}) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.conn.WriteJSON(msg)
-}
-
-func (s *WsSession) registerOperation(op *sessionOperation) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.operations == nil {
-		s.operations = make(map[string]*sessionOperation)
-	}
-	s.operations[op.id] = op
-}
-
-func (s *WsSession) unregisterOperation(opID string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.operations, opID)
-}
-
-func (s *WsSession) activeOperations() []*sessionOperation {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	ops := make([]*sessionOperation, 0, len(s.operations))
-	for _, op := range s.operations {
-		ops = append(ops, op)
-	}
-	return ops
-}
-
-func (s *WsSession) interruptCLI() bool {
-	s.mu.Lock()
-	cli := s.cli
-	s.mu.Unlock()
-
-	if cli == nil {
-		return false
-	}
-	if cli.Interrupt() {
-		return true
-	}
-
-	// SIGINT failed (process already dead), fall back to Kill
-	log.Printf("[WS] interrupt: SIGINT failed, falling back to Kill")
-	cli.Kill()
-	return true
-}
-
-// interruptActiveOperations 中斷活躍作業（WS 斷線時呼叫，跳過 skipOnDisconnect 的作業）
-func (s *WsSession) interruptActiveOperations() (hasChat bool, count int) {
-	ops := s.activeOperations()
-	for _, op := range ops {
-		if op.skipOnDisconnect {
-			continue
-		}
-		if op.kind == sessionOperationKindChat {
-			hasChat = true
-		}
-		op.Interrupt()
-		count++
-	}
-	return hasChat, count
-}
-
-// interruptAllOperations 強制中斷所有作業（使用者明確中斷時呼叫）
-func (s *WsSession) interruptAllOperations() (hasChat bool, count int) {
-	ops := s.activeOperations()
-	for _, op := range ops {
-		if op.kind == sessionOperationKindChat {
-			hasChat = true
-		}
-		op.Interrupt()
-		count++
-	}
-	return hasChat, count
 }
 
 // SnapshotStore DB-based vault snapshot CRUD.
@@ -199,15 +81,14 @@ type cachedSnapshot struct {
 
 // WsHandler is the WebSocket endpoint handler.
 type WsHandler struct {
-	chatStore          ChatStore
-	snapshotStore      SnapshotStore
-	itemWriter         executor.DataWriter
-	vaultRoot          string
-	vaultFS            mirror.VaultFS
-	sessions           sync.Map // sessionKey -> *WsSession
-	cliPool            sync.Map // memberID -> *warmCLI (warmup pool)
-	snapCache          sync.Map // memberID -> *cachedSnapshot
-	pendingForgeResult sync.Map // memberID -> map[string]interface{} (forge 背景完成後的待交付結果)
+	chatStore     ChatStore
+	snapshotStore SnapshotStore
+	itemWriter    executor.DataWriter
+	vaultRoot     string
+	vaultFS       mirror.VaultFS
+	sessions      sync.Map // sessionKey -> *WsSession
+	cliPool       sync.Map // memberID -> *warmCLI (warmup pool)
+	snapCache     sync.Map // memberID -> *cachedSnapshot
 }
 
 // NewWsHandler creates a new WsHandler.
@@ -257,15 +138,14 @@ func (h *WsHandler) HandleForgeAPI(w http.ResponseWriter, r *http.Request) {
 	log.Printf("[ForgeAPI] received forge request: title=%q member=%s session=%s", req.Title, req.MemberID, req.WsSessionID)
 
 	// 精確匹配 WebSocket session
-	sessionKey := req.MemberID + ":" + req.WsSessionID
-	val, ok := h.sessions.Load(sessionKey)
+	val, ok := h.sessions.Load(req.WsSessionID)
 	if !ok {
-		log.Printf("[ForgeAPI] session %s not found", sessionKey)
+		log.Printf("[ForgeAPI] session %s not found", req.WsSessionID)
 		http.Error(w, "session not found", http.StatusNotFound)
 		return
 	}
 	session := val.(*WsSession)
-	log.Printf("[ForgeAPI] found WebSocket session: %s", sessionKey)
+	log.Printf("[ForgeAPI] found WebSocket session for member %s", req.MemberID)
 
 	// 阻塞等待 tool_call_id（主串流 tool_use 事件須先到）
 	var toolCallID string
@@ -377,7 +257,6 @@ func (h *WsHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		status:           "idle",
 		done:             make(chan struct{}),
 		forgeToolCallIDs: make(chan string, 10),
-		operations:       make(map[string]*sessionOperation),
 	}
 	sessionKey := memberID + ":" + sessionID
 	h.sessions.Store(sessionKey, session)
@@ -390,7 +269,6 @@ func (h *WsHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	defer func() {
 		close(session.done)
-		session.interruptActiveOperations()
 		session.mu.Lock()
 		if session.cli != nil {
 			session.cli.Kill()
@@ -428,15 +306,6 @@ func (h *WsHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		"type":      "connected",
 		"sessionId": sessionKey,
 	})
-
-	// 交付背景 forge 完成的待交付結果
-	if pending, ok := h.pendingForgeResult.LoadAndDelete(memberID); ok {
-		if msg, ok := pending.(map[string]interface{}); ok {
-			log.Printf("[PluginForge] delivering pending forge result to reconnected member %s", memberID)
-			session.Send(msg)
-			session.Send(map[string]interface{}{"type": "vault_changed"})
-		}
-	}
 
 	isNew := q.Get("isNew") == "true"
 
@@ -521,9 +390,9 @@ func (h *WsHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 						time.Since(rebuildStart).Milliseconds(), len(smList))
 				}
 
-				cli, err := executor.NewStreamCLI(workDir, "chat", memberID, sessionID, model, true, 5*time.Minute)
-				if err != nil {
-					log.Printf("[WS] CLI resume start failed for %s: %v", memberID, err)
+			cli, err := executor.NewStreamCLI(workDir, "chat", memberID, sessionID, model, true, 5*time.Minute)
+			if err != nil {
+				log.Printf("[WS] CLI resume start failed for %s: %v", memberID, err)
 					return
 				}
 				session.mu.Lock()
@@ -605,16 +474,6 @@ func (h *WsHandler) handleMessage(session *WsSession, sessionKey string, msg map
 		return
 	}
 
-	chatOp := newSessionOperation(sessionOperationKindChat, "", "", func() {
-		session.interruptCLI()
-	})
-	session.registerOperation(chatOp)
-	defer session.unregisterOperation(chatOp.id)
-
-	isChatCancelled := func() bool {
-		return chatOp.ctx.Err() != nil
-	}
-
 	// noSave: 跳過所有 DB 寫入（用於卡片自動補完等一次性操作）
 	noSave := false
 	if msgObj != nil {
@@ -655,10 +514,6 @@ func (h *WsHandler) handleMessage(session *WsSession, sessionKey string, msg map
 		}
 	}
 
-	if isChatCancelled() {
-		return
-	}
-
 	// 2. Ensure StreamCLI is alive
 	ensureStart := time.Now()
 	cli := h.ensureCLI(session)
@@ -669,10 +524,6 @@ func (h *WsHandler) handleMessage(session *WsSession, sessionKey string, msg map
 			"memberID": session.memberID,
 			"error":    "failed to start CLI process",
 		})
-		return
-	}
-
-	if isChatCancelled() {
 		return
 	}
 
@@ -725,7 +576,6 @@ func (h *WsHandler) handleMessage(session *WsSession, sessionKey string, msg map
 		accumulatedThinking  string
 		prevTurnThinking     string
 		sentToolUseIDs       map[string]bool
-		pushedForgeIDs       map[string]bool
 		accumulatedToolCalls []map[string]interface{}
 		tokenUsage           json.RawMessage
 		resumeRetried        bool
@@ -742,7 +592,6 @@ sendAndProcess:
 	accumulatedThinking = ""
 	prevTurnThinking = ""
 	sentToolUseIDs = map[string]bool{}
-	pushedForgeIDs = map[string]bool{}
 	accumulatedToolCalls = nil
 	tokenUsage = nil
 	resumeFailedNoConv = false
@@ -750,9 +599,6 @@ sendAndProcess:
 	firstStdoutReceived = false
 
 	sendStart = time.Now()
-	if isChatCancelled() {
-		return
-	}
 	eventCh, sendErr = cli.SendMessage(cliContent)
 	log.Printf("[CacheProfile] sendMessage DONE — %dms", time.Since(sendStart).Milliseconds())
 	if sendErr != nil {
@@ -764,11 +610,7 @@ sendAndProcess:
 		return
 	}
 
-eventLoop:
 	for event := range eventCh {
-		if isChatCancelled() {
-			break eventLoop
-		}
 		if event.Type != "stdout" {
 			continue
 		}
@@ -819,24 +661,6 @@ eventLoop:
 				// #endregion
 			}
 
-			if innerType == "content_block_start" {
-				if cb, ok := inner["content_block"].(map[string]interface{}); ok {
-					if cb["type"] == "tool_use" {
-						toolID, _ := cb["id"].(string)
-						toolName, _ := cb["name"].(string)
-						if toolName == "mcp__plugin-forge__plugin_forge" && toolID != "" {
-							pushedForgeIDs[toolID] = true
-							select {
-							case session.forgeToolCallIDs <- toolID:
-								log.Printf("[WS] forge tool_call_id pushed early (content_block_start): %s", toolID)
-							default:
-								log.Printf("[WS] forgeToolCallIDs channel full, dropping: %s", toolID)
-							}
-						}
-					}
-				}
-			}
-
 			if innerType == "content_block_delta" {
 				delta, _ := inner["delta"].(map[string]interface{})
 				if delta == nil {
@@ -855,7 +679,7 @@ eventLoop:
 							"accumulated": accumulatedText,
 						})
 					}
-				case "thinking_delta":
+					case "thinking_delta":
 					text, _ := delta["thinking"].(string)
 					if text != "" {
 						accumulatedThinking += text
@@ -893,7 +717,7 @@ eventLoop:
 									"accumulated": accumulatedText,
 								})
 							}
-						case "thinking":
+							case "thinking":
 							text, _ := blockMap["thinking"].(string)
 							if text != "" && text != accumulatedThinking && text != prevTurnThinking {
 								accumulatedThinking = text
@@ -913,49 +737,47 @@ eventLoop:
 									"accumulated": accumulatedThinking,
 								})
 							}
-						case "tool_use":
-							toolID, _ := blockMap["id"].(string)
-							if toolID != "" && sentToolUseIDs[toolID] {
-								continue
-							}
-							sentToolUseIDs[toolID] = true
-							inputJSON, _ := json.Marshal(blockMap["input"])
-							tc := map[string]interface{}{
-								"id":   toolID,
-								"type": "function",
-								"function": map[string]interface{}{
-									"name":      blockMap["name"],
-									"arguments": string(inputJSON),
-								},
-							}
-							accumulatedToolCalls = append(accumulatedToolCalls, tc)
-							// content_block_start 已提前 push 的不重複推（fallback：stream 沒有 content_block_start 時由此補推）
-							toolName, _ := blockMap["name"].(string)
-							if toolName == "mcp__plugin-forge__plugin_forge" && toolID != "" && !pushedForgeIDs[toolID] {
-								pushedForgeIDs[toolID] = true
-								select {
-								case session.forgeToolCallIDs <- toolID:
-									log.Printf("[WS] forge tool_call_id pushed (assistant fallback): %s", toolID)
-								default:
-									log.Printf("[WS] forgeToolCallIDs channel full, dropping: %s", toolID)
-								}
-							}
-							// #region agent log
-							debugMirrorLog("api/ws_handler.go:729", "MirrorThinking-DEBUG assistant_tool_use", debugRunInitial, "H1", map[string]interface{}{
-								"sessionID":           session.sessionID,
-								"toolID":              toolID,
-								"toolName":            toolName,
-								"accumulatedTextLen":  len(accumulatedText),
-								"accumulatedThinkLen": len(accumulatedThinking),
-								"toolCallCount":       len(accumulatedToolCalls),
-							})
-							// #endregion
-							session.Send(map[string]interface{}{
-								"type":       "message",
-								"role":       "assistant",
-								"content":    "",
-								"tool_calls": []map[string]interface{}{tc},
-							})
+				case "tool_use":
+				toolID, _ := blockMap["id"].(string)
+				if toolID != "" && sentToolUseIDs[toolID] {
+					continue
+				}
+				sentToolUseIDs[toolID] = true
+				inputJSON, _ := json.Marshal(blockMap["input"])
+				tc := map[string]interface{}{
+					"id":   toolID,
+					"type": "function",
+					"function": map[string]interface{}{
+						"name":      blockMap["name"],
+						"arguments": string(inputJSON),
+					},
+				}
+					accumulatedToolCalls = append(accumulatedToolCalls, tc)
+					// plugin forge tool_call_id 暫存到 session，供 executePluginForge 使用
+					toolName, _ := blockMap["name"].(string)
+					if toolName == "mcp__plugin-forge__plugin_forge" && toolID != "" {
+						select {
+						case session.forgeToolCallIDs <- toolID:
+						default:
+							log.Printf("[WS] forgeToolCallIDs channel full, dropping: %s", toolID)
+						}
+					}
+					// #region agent log
+					debugMirrorLog("api/ws_handler.go:729", "MirrorThinking-DEBUG assistant_tool_use", debugRunInitial, "H1", map[string]interface{}{
+						"sessionID":           session.sessionID,
+						"toolID":              toolID,
+						"toolName":            toolName,
+						"accumulatedTextLen":  len(accumulatedText),
+						"accumulatedThinkLen": len(accumulatedThinking),
+						"toolCallCount":       len(accumulatedToolCalls),
+					})
+					// #endregion
+					session.Send(map[string]interface{}{
+						"type":       "message",
+						"role":       "assistant",
+						"content":    "",
+						"tool_calls": []map[string]interface{}{tc},
+					})
 						}
 					}
 				}
@@ -1093,10 +915,6 @@ eventLoop:
 		}
 	}
 
-	if isChatCancelled() {
-		return
-	}
-
 	// Resume fallback: CLI 回報 "No conversation found" 時，用新 session + 歷史注入重試
 	if resumeFailedNoConv && !resumeRetried {
 		resumeRetried = true
@@ -1143,10 +961,6 @@ eventLoop:
 			session.Send(map[string]interface{}{"type": "cli_preparing"})
 			goto sendAndProcess
 		}
-	}
-
-	if isChatCancelled() {
-		return
 	}
 
 	// （FORGE 標記偵測已移除 — 改用 MCP tool plugin_forge 觸發）
@@ -1389,7 +1203,6 @@ func (h *WsHandler) updateUserLocale(memberID, timezone, lang string) {
 }
 
 // enforceMaxCLIs kills oldest CLIs for a user if they exceed maxCount.
-// task mode 不受此限制，避免排程任務被一般 chat 擠掉。
 func (h *WsHandler) enforceMaxCLIs(memberID string, maxCount int) {
 	type sessionEntry struct {
 		key     string
@@ -1562,18 +1375,23 @@ func (h *WsHandler) buildResumeHistoryContext(sessionID, mode string) string {
 }
 
 func (h *WsHandler) handleInterrupt(session *WsSession) {
-	hasChat, opCount := session.interruptAllOperations()
-	if opCount == 0 && session.interruptCLI() {
-		hasChat = true
+	session.mu.Lock()
+	cli := session.cli
+	session.mu.Unlock()
+
+	if cli != nil {
+		if !cli.Interrupt() {
+			// SIGINT failed (process already dead), fall back to Kill
+			log.Printf("[WS] interrupt: SIGINT failed, falling back to Kill")
+			cli.Kill()
+		}
 	}
 
-	if hasChat {
-		session.Send(map[string]interface{}{
-			"type":     "stream_interrupted",
-			"memberID": session.memberID,
-			"message":  "已中斷",
-		})
-	}
+	session.Send(map[string]interface{}{
+		"type":     "stream_interrupted",
+		"memberID": session.memberID,
+		"message":  "已中斷",
+	})
 }
 
 // findPluginEntry 在插件目錄下找入口檔（*Plugin.tsx），找不到回退到 main.tsx
@@ -1590,6 +1408,10 @@ func findPluginEntry(vaultFS mirror.VaultFS, pluginRoot string) string {
 		if strings.HasSuffix(name, "Plugin.tsx") {
 			return name
 		}
+	}
+	// 回退：相容舊的 main.tsx
+	if vaultFS.Exists(filepath.Join(pluginRoot, "main.tsx")) {
+		return "main.tsx"
 	}
 	return ""
 }
@@ -1626,13 +1448,6 @@ func sanitizePluginDir(title string) string {
 	return fmt.Sprintf("%s-%x", slug, h[:3])
 }
 
-func truncateStr(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen] + "..."
-}
-
 // executePluginForge 啟動插件鍛造 Sub-Agent（同步阻塞到完成）
 // session 可為 nil（沒有 WebSocket 時不發意圖事件）
 func (h *WsHandler) executePluginForge(session *WsSession, memberID, forgeTitle, userPrompt, toolCallID string) map[string]interface{} {
@@ -1651,63 +1466,6 @@ func (h *WsHandler) executePluginForge(session *WsSession, memberID, forgeTitle,
 		}
 	}
 
-	// forge 使用獨立 context：WS 斷線不會取消，只有使用者明確中斷才會取消（無 timeout）
-	forgeCtx, forgeCancel := context.WithCancel(context.Background())
-	defer forgeCancel()
-
-	var forgeOp *sessionOperation
-	if session != nil {
-		forgeOp = newSessionOperation(sessionOperationKindPluginForge, "", toolCallID, forgeCancel)
-		forgeOp.skipOnDisconnect = true
-		session.registerOperation(forgeOp)
-		defer session.unregisterOperation(forgeOp.id)
-	}
-
-	cancelledResult := func() map[string]interface{} {
-		log.Printf("[PluginForge] forge 被使用者中斷")
-		sendWS(map[string]interface{}{
-			"type":    "sub_agent_complete",
-			"status":  "cancelled",
-			"message": "已中斷",
-		})
-		return map[string]interface{}{
-			"status":  "cancelled",
-			"message": "已中斷",
-		}
-	}
-
-	checkForgeContext := func() map[string]interface{} {
-		if errors.Is(forgeCtx.Err(), context.Canceled) {
-			return cancelledResult()
-		}
-		return nil
-	}
-
-	// keepalive goroutine：定期送心跳防止 WS 閒置斷線
-	keepaliveDone := make(chan struct{})
-	defer close(keepaliveDone)
-	go func() {
-		ticker := time.NewTicker(20 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				sendWS(map[string]interface{}{"type": "sub_agent_intent", "step": "forge_heartbeat"})
-			case <-keepaliveDone:
-				return
-			case <-forgeCtx.Done():
-				return
-			}
-		}
-	}()
-
-	// Sub-Agent 模型繼承 Main Agent 的模型選擇
-	forgeModel := "claude-sonnet-4-6" // fallback
-	if session != nil && session.model != "" {
-		forgeModel = session.model
-	}
-	log.Printf("[PluginForge] using model: %s (session model: %v)", forgeModel, session != nil && session.model != "")
-
 	sendWS(map[string]interface{}{"type": "sub_agent_start", "title": forgeTitle})
 
 	vaultRoot := os.Getenv("VAULT_ROOT")
@@ -1725,64 +1483,28 @@ func (h *WsHandler) executePluginForge(session *WsSession, memberID, forgeTitle,
 
 	instructions := strings.ReplaceAll(string(pluginTemplate), "{VAULT_SHARED}", sharedDir)
 
+	// 預先推導 pluginDir 名稱給 Sub-Agent（保留 Unicode 字母/數字，加短 hash 防碰撞）
 	cleanDir := sanitizePluginDir(forgeTitle)
 
-	userPromptFull := fmt.Sprintf("插件目錄名稱：plugins/%s/\n用戶需求：%s", cleanDir, userPrompt)
+	fullPrompt := fmt.Sprintf("%s\n\n---\n\n插件目錄名稱：plugins/%s/\n用戶需求：%s", instructions, cleanDir, userPrompt)
 	workDir := filepath.Join(vaultRoot, memberID)
-
-	// 清理舊的未完成 forge 目錄（沒有 bundle.js 的插件目錄 = forge 沒跑完）
-	pluginsRoot := filepath.Join(workDir, "plugins")
-	if dirEntries, err := os.ReadDir(pluginsRoot); err == nil {
-		for _, de := range dirEntries {
-			if !de.IsDir() {
-				continue
-			}
-			subDir := filepath.Join(pluginsRoot, de.Name())
-			files, _ := os.ReadDir(subDir)
-			hasBundleJS := false
-			hasSourceFiles := false
-			for _, f := range files {
-				name := f.Name()
-				if name == "bundle.js" {
-					hasBundleJS = true
-				}
-				if strings.HasSuffix(name, ".tsx") || strings.HasSuffix(name, ".ts") || strings.HasSuffix(name, ".css") {
-					hasSourceFiles = true
-				}
-			}
-			if hasSourceFiles && !hasBundleJS {
-				log.Printf("[PluginForge] cleanup incomplete forge dir: %s", de.Name())
-				os.RemoveAll(subDir)
-			}
-		}
-	}
 
 	sendWS(map[string]interface{}{"type": "sub_agent_intent", "step": "forge_init"})
 
-	if result := checkForgeContext(); result != nil {
-		return result
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
 
 	args := []string{
 		"--print",
 		"--output-format", "stream-json",
 		"--verbose",
-		"--model", forgeModel,
+		"--model", "claude-opus-4-6",
 		"--dangerously-skip-permissions",
-		"--mcp-config", "/app/config/claude-forge-settings.json",
-		"--system-prompt", instructions,
-		"-p", userPromptFull,
+		"--mcp-config", "/home/mirror/.claude/settings.json",
+		"-p", fullPrompt,
 	}
 
-	log.Printf("[PluginForge] === SUB-AGENT LAUNCH ===")
-	log.Printf("[PluginForge] workDir=%s", workDir)
-	log.Printf("[PluginForge] args=%v", args[:len(args)-2]) // 不印 -p prompt 內容（太長）
-	log.Printf("[PluginForge] system-prompt length=%d bytes", len(instructions))
-	if len(instructions) > 200 {
-		log.Printf("[PluginForge] system-prompt preview: %s...", instructions[:200])
-	}
-
-	cmd := executor.NewClaudeCmdExported(forgeCtx, workDir, "plugin", memberID, args)
+	cmd := executor.NewClaudeCmdExported(ctx, workDir, "plugin", memberID, args)
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
 		sendWS(map[string]interface{}{"type": "sub_agent_complete", "status": "error", "error": err.Error()})
@@ -1807,114 +1529,68 @@ func (h *WsHandler) executePluginForge(session *WsSession, memberID, forgeTitle,
 		}
 	}()
 
-	// 讀取 Sub-Agent 事件，完整 log + 過濾後發送意圖流
+	// 讀取 Sub-Agent 事件，過濾後發送意圖流
 	scanner := bufio.NewScanner(stdoutPipe)
 	scanner.Buffer(make([]byte, 256*1024), 256*1024)
 	lastIntent := ""
-	eventCount := 0
 	for scanner.Scan() {
-		if result := checkForgeContext(); result != nil {
-			return result
-		}
 		line := scanner.Text()
 		if line == "" {
 			continue
 		}
-		eventCount++
 		var parsed map[string]interface{}
 		if json.Unmarshal([]byte(line), &parsed) != nil {
-			log.Printf("[PluginForge-RAW] non-json: %s", truncateStr(line, 300))
 			continue
 		}
-
-		evtType, _ := parsed["type"].(string)
-
-		switch evtType {
-		case "system":
-			log.Printf("[PluginForge-EVT] system: %s", truncateStr(line, 500))
-
-		case "assistant":
+		if parsed["type"] == "assistant" {
 			if mc, ok := parsed["message"].(map[string]interface{}); ok {
-				model, _ := mc["model"].(string)
-				if eventCount <= 3 {
-					log.Printf("[PluginForge-EVT] assistant model=%s", model)
-				}
 				if ca, ok := mc["content"].([]interface{}); ok {
 					for _, block := range ca {
 						bm, ok := block.(map[string]interface{})
-						if !ok {
+						if !ok || bm["type"] != "tool_use" {
 							continue
 						}
-						blockType, _ := bm["type"].(string)
-
-						switch blockType {
-						case "thinking":
-							thinking, _ := bm["thinking"].(string)
-							log.Printf("[PluginForge-THINK] %s", truncateStr(thinking, 500))
-
-						case "text":
-							text, _ := bm["text"].(string)
-							log.Printf("[PluginForge-TEXT] %s", truncateStr(text, 300))
-
-						case "tool_use":
-							toolName, _ := bm["name"].(string)
-							input, _ := bm["input"].(map[string]interface{})
-							inputJSON, _ := json.Marshal(input)
-							log.Printf("[PluginForge-TOOL] %s input=%s", toolName, truncateStr(string(inputJSON), 300))
-
-							// 轉發意圖流到前端
-							evt := map[string]interface{}{"type": "sub_agent_intent", "tool_name": toolName}
-							switch toolName {
-							case "Read", "Write", "Edit":
-								if fp, _ := input["file_path"].(string); fp != "" {
-									evt["file_name"] = filepath.Base(fp)
-								}
-							case "Bash":
-								if d, _ := input["description"].(string); d != "" {
-									evt["description"] = d
-								} else if c, _ := input["command"].(string); c != "" {
-									if len(c) > 50 {
-										c = c[:50] + "..."
-									}
-									evt["command"] = c
-								}
-							case "Glob":
-								if p, _ := input["pattern"].(string); p != "" {
-									evt["pattern"] = p
-								}
-							case "Grep":
-								if p, _ := input["pattern"].(string); p != "" {
-									evt["pattern"] = p
-								}
-							}
-							intentKey := toolName
-							if fn, ok := evt["file_name"].(string); ok {
-								intentKey += ":" + fn
-							}
-							if intentKey != lastIntent {
-								lastIntent = intentKey
-								sendWS(evt)
-							}
-
-						case "tool_result":
-							content, _ := bm["content"].(string)
-							log.Printf("[PluginForge-RESULT] %s", truncateStr(content, 300))
+					toolName, _ := bm["name"].(string)
+					input, _ := bm["input"].(map[string]interface{})
+					evt := map[string]interface{}{"type": "sub_agent_intent", "tool_name": toolName}
+					switch toolName {
+					case "Read", "Write", "Edit":
+						if fp, _ := input["file_path"].(string); fp != "" {
+							evt["file_name"] = filepath.Base(fp)
 						}
+					case "Bash":
+						if d, _ := input["description"].(string); d != "" {
+							evt["description"] = d
+						} else if c, _ := input["command"].(string); c != "" {
+							if len(c) > 50 {
+								c = c[:50] + "..."
+							}
+							evt["command"] = c
+						}
+					case "Glob":
+						if p, _ := input["pattern"].(string); p != "" {
+							evt["pattern"] = p
+						}
+					case "Grep":
+						if p, _ := input["pattern"].(string); p != "" {
+							evt["pattern"] = p
+						}
+					}
+					intentKey := toolName
+					if fn, ok := evt["file_name"].(string); ok {
+						intentKey += ":" + fn
+					}
+					if intentKey != lastIntent {
+						lastIntent = intentKey
+						sendWS(evt)
+					}
 					}
 				}
 			}
-
-		case "result":
-			log.Printf("[PluginForge-EVT] result: %s", truncateStr(line, 500))
-			h.recordBilling(memberID, "forge", session.sessionID, parsed)
 		}
 	}
-	log.Printf("[PluginForge] === SUB-AGENT STREAM END === total events=%d", eventCount)
 
 	if waitErr := cmd.Wait(); waitErr != nil {
-		if errors.Is(forgeCtx.Err(), context.Canceled) {
-			return cancelledResult()
-		}
 		log.Printf("[PluginForge] sub-agent exited with error: %v", waitErr)
 		sendWS(map[string]interface{}{"type": "sub_agent_complete", "status": "error", "error": waitErr.Error()})
 		return map[string]interface{}{"status": "error", "error": waitErr.Error()}
@@ -1938,16 +1614,8 @@ func (h *WsHandler) executePluginForge(session *WsSession, memberID, forgeTitle,
 			}
 		}
 	}
-
 	if entryFile == "" {
-		// 列出插件目錄內容以利偵錯
-		debugDir := filepath.Join(workDir, "plugins", pluginDir)
-		dirEntries, _ := os.ReadDir(debugDir)
-		var fileNames []string
-		for _, de := range dirEntries {
-			fileNames = append(fileNames, de.Name())
-		}
-		errMsg := fmt.Sprintf("找不到入口檔案 *Plugin.tsx，插件目錄 %s 內容: %v", pluginDir, fileNames)
+		errMsg := fmt.Sprintf("找不到入口檔 (*Plugin.tsx) in plugins/%s", pluginDir)
 		log.Printf("[PluginForge] %s", errMsg)
 		sendWS(map[string]interface{}{"type": "sub_agent_complete", "status": "error", "error": errMsg})
 		return map[string]interface{}{"status": "error", "error": errMsg}
@@ -2011,18 +1679,9 @@ func (h *WsHandler) executePluginForge(session *WsSession, memberID, forgeTitle,
 		log.Printf("[PluginForge] failed to write PLUGIN json to vault: %v", writeErr)
 	}
 
-	completeMsg := map[string]interface{}{"type": "sub_agent_complete", "status": "success", "title": forgeTitle,
-		"plugin": map[string]interface{}{"id": pluginID, "pluginDir": pluginDir, "bundleHash": bundleHash}}
-	sendWS(completeMsg)
+	sendWS(map[string]interface{}{"type": "sub_agent_complete", "status": "success", "title": forgeTitle,
+		"plugin": map[string]interface{}{"id": pluginID, "pluginDir": pluginDir, "bundleHash": bundleHash}})
 	sendWS(map[string]interface{}{"type": "vault_changed"})
-
-	// 若 WS 已斷線，儲存結果供使用者 reconnect 時交付
-	if session != nil {
-		if err := session.Send(map[string]interface{}{"type": "ping"}); err != nil {
-			log.Printf("[PluginForge] WS disconnected, storing pending result for member %s", memberID)
-			h.pendingForgeResult.Store(memberID, completeMsg)
-		}
-	}
 
 	return map[string]interface{}{
 		"status": "success", "title": forgeTitle,
