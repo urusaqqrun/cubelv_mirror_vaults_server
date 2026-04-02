@@ -110,7 +110,7 @@
 this.registerSidebarWithView({
     sidebar: {
         id: 'my-plugin',
-        title: i18n.t('myPlugin'),
+        title: i18next.t('myPlugin'),
         orderAt: 600,
         useData: useMyPluginSidebarData,
     },
@@ -129,7 +129,7 @@ this.registerSidebarWithView({
 this.registerSidebarWithView({
     sidebar: {
         id: 'pomodoro',
-        title: i18n.t('pomodoro'),
+        title: i18next.t('pomodoro'),
         orderAt: 700,
         useData: usePomodoroSidebarData,
     },
@@ -200,7 +200,8 @@ registerPluginClass(PomodoroPlugin, '番茄鐘', {
 
 ### SDK / Import 規則
 
-- 所有框架 API（`Plugin`、`ReactView`、`registerPluginClass`、`useItemStore`、`i18n` 等）一律從 `@cubelv/sdk` import
+- 所有框架 API（`Plugin`、`ReactView`、`registerPluginClass`、`useItemStore`、`i18next` 等）一律從 `@cubelv/sdk` import
+- **國際化只能 import `i18next`，禁止 import `i18n`**。宿主 SDK 暴露的是 `i18next`，若寫成 `import { i18n } from '@cubelv/sdk'`，插件會在 `onload()` 時直接 crash
 - **禁止 `require()`** — 只能用 ES module `import`
 - **禁止 `import React from 'react'`**（本環境使用 `jsx: 'automatic'`）
 - 允許的 import 來源只有三種：
@@ -265,8 +266,9 @@ function loadSetting<T>(key: string, defaultValue: T): T {
 
 ### 國際化 i18n（重要 — 所有使用者可見文字都必須翻譯）
 
-- **所有 UI 文字**（按鈕文字、標題、placeholder、tooltip、提示訊息、aria-label）一律使用 `i18n.t('key')`
+- **所有 UI 文字**（按鈕文字、標題、placeholder、tooltip、提示訊息、aria-label）一律使用 `i18next.t('key')`
 - **禁止任何硬編碼的使用者可見字串**，包括看起來「只有英文應該沒問題」的文字（如 `"Start"`、`"Settings"`）
+- 入口檔案若需要標題、sidebar 名稱、`getDisplayText()`，也必須使用 `i18next.t(...)`
 - 翻譯必須同時提供 **`zh-Hant`、`en`、`ja`** 三個語系，在 `setupI18n` 中用 `registerPluginLocales` 註冊
 - **反面範例（禁止）：**
 ```tsx
@@ -275,7 +277,7 @@ function loadSetting<T>(key: string, defaultValue: T): T {
 ```
 - **正確做法：**
 ```tsx
-<button>{i18n.t('start')}</button>
+<button>{i18next.t('start')}</button>
 ```
 並在 `setupI18n` 中：
 ```typescript
@@ -342,6 +344,7 @@ grep -c '^import ' plugins/{你的插件目錄}/bundle.js
 對插件目錄執行以下 grep，每項結果必須為 0 筆：
 
 - [ ] `grep -rn 'import React from' *.tsx *.ts` → 0 筆
+- [ ] `grep -rEn "import\\s*\\{[^}]*\\bi18n\\b[^}]*\\}\\s*from '@cubelv/sdk'" *.tsx *.ts` → 0 筆
 - [ ] `grep -rn '// =====' *.tsx *.ts` → 0 筆
 - [ ] `grep -rEn '#[0-9a-fA-F]{3,8}' *.css` → 0 筆（CSS 中無硬編碼顏色）
 - [ ] `grep -rEn "rgb\(|rgba\(" *.css` → 0 筆（CSS 中無 rgb/rgba）
@@ -356,9 +359,9 @@ grep -c '^import ' plugins/{你的插件目錄}/bundle.js
 
 ### D. 國際化
 
-- [ ] 所有 `.tsx` 中沒有硬編碼的使用者可見中文/英文/日文字串 → 全部使用 `i18n.t()`
+- [ ] 所有 `.tsx` 中沒有硬編碼的使用者可見中文/英文/日文字串 → 全部使用 `i18next.t()`
 - [ ] `setupI18n` 中同時提供 `zh-Hant`、`en`、`ja` 三種語系
-- [ ] `registerPluginLocales` 中的 key 與元件中 `i18n.t()` 使用的 key 完全對應
+- [ ] `registerPluginLocales` 中的 key 與元件中 `i18next.t()` 使用的 key 完全對應
 
 ### E. CSS 主題
 

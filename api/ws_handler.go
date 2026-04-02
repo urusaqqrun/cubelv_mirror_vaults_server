@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -33,6 +34,13 @@ const (
 	wsPingInterval = 30 * time.Second
 	wsPongWait     = 90 * time.Second
 	wsWriteWait    = 10 * time.Second
+)
+
+var (
+	forgedPluginBundleImportPattern     = regexp.MustCompile(`(?m)^import `)
+	forgedPluginSDKI18nImportPattern    = regexp.MustCompile(`import\s*\{[^}]*\bi18n\b[^}]*\}\s*from\s*['"]@cubelv/sdk['"]`)
+	forgedPluginReactDefaultImportRegex = regexp.MustCompile(`import\s+React\s+from\s*['"]react['"]`)
+	forgedPluginRequirePattern          = regexp.MustCompile(`require\(`)
 )
 
 // WsSession represents a single WebSocket connection session.
@@ -1627,6 +1635,13 @@ func (h *WsHandler) executePluginForge(session *WsSession, memberID, forgeTitle,
 	}
 	log.Printf("[PluginForge] bundle.js found: %s", bundlePath)
 
+	if validateErr := validateForgedPluginDir(filepath.Join(workDir, "plugins", pluginDir)); validateErr != nil {
+		errMsg := fmt.Sprintf("插件自檢未通過（%s）", validateErr.Error())
+		log.Printf("[PluginForge] %s", errMsg)
+		sendWS(map[string]interface{}{"type": "sub_agent_complete", "status": "error", "error": errMsg})
+		return map[string]interface{}{"status": "error", "error": errMsg}
+	}
+
 	// 計算 bundle hash
 	bundleFullPath := filepath.Join(memberID, "plugins", pluginDir, "bundle.js")
 	bundleBytes, _ := h.vaultFS.ReadFile(bundleFullPath)
@@ -1682,6 +1697,51 @@ func (h *WsHandler) executePluginForge(session *WsSession, memberID, forgeTitle,
 		"status": "success", "title": forgeTitle,
 		"pluginDir": pluginDir, "bundleHash": bundleHash,
 	}
+}
+
+func validateForgedPluginDir(pluginDir string) error {
+	bundlePath := filepath.Join(pluginDir, "bundle.js")
+	bundleBytes, err := os.ReadFile(bundlePath)
+	if err != nil {
+		return fmt.Errorf("讀取 bundle.js 失敗")
+	}
+	if forgedPluginBundleImportPattern.Match(bundleBytes) {
+		return fmt.Errorf("bundle.js 仍含 ES module import")
+	}
+
+	entries, err := os.ReadDir(pluginDir)
+	if err != nil {
+		return fmt.Errorf("讀取插件目錄失敗")
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+
+		ext := filepath.Ext(entry.Name())
+		if ext != ".ts" && ext != ".tsx" {
+			continue
+		}
+
+		filePath := filepath.Join(pluginDir, entry.Name())
+		fileBytes, readErr := os.ReadFile(filePath)
+		if readErr != nil {
+			return fmt.Errorf("讀取 %s 失敗", entry.Name())
+		}
+
+		if forgedPluginSDKI18nImportPattern.Match(fileBytes) {
+			return fmt.Errorf("%s 使用了被禁止的 i18n import", entry.Name())
+		}
+		if forgedPluginReactDefaultImportRegex.Match(fileBytes) {
+			return fmt.Errorf("%s 使用了被禁止的 React default import", entry.Name())
+		}
+		if forgedPluginRequirePattern.Match(fileBytes) {
+			return fmt.Errorf("%s 使用了被禁止的 require()", entry.Name())
+		}
+	}
+
+	return nil
 }
 
 func (h *WsHandler) maybeGenerateTitle(session *WsSession, userMsg, assistantMsg string) {

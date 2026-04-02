@@ -50,6 +50,33 @@ if [ "$TASK_SCOPE" = "plugin" ]; then
       append_error "${REL}/bundle.css 禁止使用，CSS 檔案必須用有意義的名稱（如 Timer.css）"
     fi
 
+    # 必須生成 bundle.js
+    if [ ! -f "$plugin_dir/bundle.js" ]; then
+      append_error "${REL}/bundle.js 缺失，必須完成編譯後才能結束"
+    else
+      # bundle.js 不可保留 ES module import
+      if grep -q '^import ' "$plugin_dir/bundle.js"; then
+        append_error "${REL}/bundle.js 含有 ES module import，必須使用 IIFE 編譯"
+      fi
+    fi
+
+    # 禁止錯誤的 i18n import
+    if grep -REn "import[[:space:]]*\\{[^}]*\\bi18n\\b[^}]*\\}[[:space:]]*from[[:space:]]*['\"]@cubelv/sdk['\"]" \
+      "$plugin_dir"/*.ts "$plugin_dir"/*.tsx >/dev/null 2>&1; then
+      append_error "${REL} 使用了被禁止的 i18n import，必須改成 i18next"
+    fi
+
+    # 禁止 React default import
+    if grep -REn "import[[:space:]]+React[[:space:]]+from[[:space:]]*['\"]react['\"]" \
+      "$plugin_dir"/*.ts "$plugin_dir"/*.tsx >/dev/null 2>&1; then
+      append_error "${REL} 使用了被禁止的 React default import"
+    fi
+
+    # 禁止 require
+    if grep -RIn "require(" "$plugin_dir"/*.ts "$plugin_dir"/*.tsx >/dev/null 2>&1; then
+      append_error "${REL} 使用了被禁止的 require()"
+    fi
+
   done < <(find "$CWD/plugins" -maxdepth 1 -mindepth 1 -type d 2>/dev/null)
 
   if [ -n "$ERRORS" ]; then
