@@ -321,6 +321,8 @@ func (h *WsHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 					session.mu.Lock()
 					session.cli = wc.cli
 					session.mu.Unlock()
+					// 暖 CLI 建立時沒有 WS_SESSION_ID，寫檔讓 MCP tool 讀取
+					os.WriteFile(filepath.Join(workDir, ".ws_session_id"), []byte(sessionID), 0644)
 					log.Printf("[CacheProfile] WS goroutine: reused warm CLI — %dms, model=%s, pid=%d",
 						time.Since(wsCliStart).Milliseconds(), model, wc.cli.Pid())
 					return

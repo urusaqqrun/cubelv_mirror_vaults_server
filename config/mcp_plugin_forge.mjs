@@ -6,6 +6,8 @@
  */
 
 import { createInterface } from 'readline';
+import { readFileSync } from 'fs';
+import { join } from 'path';
 
 const MIRROR_SERVICE_URL = process.env.MIRROR_INTERNAL_URL || 'http://localhost:8080';
 
@@ -27,7 +29,10 @@ async function forgePlugin(args) {
   if (!title || !prompt) return '錯誤：title 和 prompt 為必填';
 
   const memberID = process.env.VAULT_USER_ID || '';
-  const wsSessionID = process.env.WS_SESSION_ID || '';
+  let wsSessionID = process.env.WS_SESSION_ID || '';
+  if (!wsSessionID) {
+    try { wsSessionID = readFileSync(join(process.cwd(), '.ws_session_id'), 'utf8').trim(); } catch {}
+  }
 
   // forge 禁止 timeout — 用 http.request 手動發 POST，socket timeout 設為 0（永不超時）
   const http = await import('http');
