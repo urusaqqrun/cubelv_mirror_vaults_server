@@ -121,6 +121,7 @@ func (h *WsHandler) HandleForgeAPI(w http.ResponseWriter, r *http.Request) {
 		Prompt      string `json:"prompt"`
 		MemberID    string `json:"memberID"`
 		WsSessionID string `json:"wsSessionID"`
+		ForgeType   string `json:"forgeType"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
@@ -165,8 +166,13 @@ func (h *WsHandler) HandleForgeAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	forgeType := req.ForgeType
+	if forgeType == "" {
+		forgeType = "ui"
+	}
+
 	// 執行插件鍛造（同步，阻塞到完成）
-	result := h.executePluginForge(session, req.MemberID, req.Title, req.Prompt, toolCallID)
+	result := h.executePluginForge(session, req.MemberID, req.Title, req.Prompt, toolCallID, forgeType)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(result)
@@ -1278,7 +1284,7 @@ func sanitizePluginDir(title string) string {
 }
 
 // executePluginForge 啟動插件鍛造 Sub-Agent（同步阻塞到完成）
-func (h *WsHandler) executePluginForge(session *WsSession, memberID, forgeTitle, userPrompt, toolCallID string) map[string]interface{} {
+func (h *WsHandler) executePluginForge(session *WsSession, memberID, forgeTitle, userPrompt, toolCallID, forgeType string) map[string]interface{} {
 	log.Printf("[PluginForge] starting: title=%q member=%s tool_call_id=%s", forgeTitle, memberID, toolCallID)
 
 	sendWS := func(msg map[string]interface{}) {
@@ -1301,7 +1307,7 @@ func (h *WsHandler) executePluginForge(session *WsSession, memberID, forgeTitle,
 		Title:      forgeTitle,
 		Prompt:     userPrompt,
 		ToolCallID: toolCallID,
-		ForgeType:  "ui",
+		ForgeType:  forgeType,
 	})
 	if err != nil {
 		sendWS(map[string]interface{}{"type": "sub_agent_complete", "status": "error", "error": err.Error()})

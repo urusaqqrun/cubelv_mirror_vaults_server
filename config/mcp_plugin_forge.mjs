@@ -17,12 +17,13 @@ const MIRROR_SERVICE_URL = process.env.MIRROR_INTERNAL_URL;
 
 const TOOL_DEF = {
   name: 'plugin_forge',
-  description: '啟動插件鍛造 Sub-Agent 建立新插件。當用戶要求新增自定義功能（如番茄鐘、看板、自定義面板等）時使用此工具。Sub-Agent 會讀取內建插件原始碼作為參考，自動建立、編譯並註冊新插件。',
+  description: '啟動插件鍛造 Sub-Agent 建立新插件或後端服務。當用戶要求新增自定義功能（如番茄鐘、看板、自定義面板等）時使用此工具。Sub-Agent 會讀取內建插件原始碼作為參考，自動建立、編譯並註冊新插件。',
   inputSchema: {
     type: 'object',
     properties: {
       title: { type: 'string', description: '插件名稱（如「番茄鐘插件」）' },
       prompt: { type: 'string', description: '用戶的完整需求描述' },
+      forgeType: { type: 'string', enum: ['ui', 'service'], description: '鍛造類型：ui（前端插件，預設）或 service（後端服務）' },
     },
     required: ['title', 'prompt']
   }
@@ -39,7 +40,7 @@ function loadScopedSessionBinding() {
 }
 
 async function forgePlugin(args) {
-  const { title, prompt } = args;
+  const { title, prompt, forgeType } = args;
   if (!title || !prompt) return '錯誤：title 和 prompt 為必填';
 
   const memberID = process.env.VAULT_USER_ID || '';
@@ -52,7 +53,7 @@ async function forgePlugin(args) {
   // forge 禁止 timeout — 用 http.request 手動發 POST，socket timeout 設為 0（永不超時）
   const http = await import('http');
   const url = new URL(`${MIRROR_SERVICE_URL}/api/internal/forge`);
-  const postData = JSON.stringify({ title, prompt, memberID, wsSessionID });
+  const postData = JSON.stringify({ title, prompt, memberID, wsSessionID, forgeType: forgeType || 'ui' });
 
   const result = await new Promise((resolve, reject) => {
     const req = http.request({
