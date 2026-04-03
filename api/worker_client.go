@@ -17,7 +17,7 @@ import (
 	"github.com/urusaqqrun/vault-mirror-service/executor"
 )
 
-// ChatCLI 統一介面：本機 StreamCLI 和遠端 RemoteCLI 都實現此介面
+// ChatCLI 介面：遠端 CLI Worker 代理
 type ChatCLI interface {
 	SendMessage(content interface{}) (<-chan executor.StreamEvent, error)
 	IsAlive() bool
@@ -26,25 +26,6 @@ type ChatCLI interface {
 	Pid() int
 	GetCacheBuilt() bool
 	SetCacheBuilt(v bool)
-}
-
-// localCLIAdapter 把 *executor.StreamCLI 包裝成 ChatCLI
-type localCLIAdapter struct {
-	cli *executor.StreamCLI
-}
-
-func (a *localCLIAdapter) SendMessage(content interface{}) (<-chan executor.StreamEvent, error) {
-	return a.cli.SendMessage(content)
-}
-func (a *localCLIAdapter) IsAlive() bool     { return a.cli.IsAlive() }
-func (a *localCLIAdapter) Kill()             { a.cli.Kill() }
-func (a *localCLIAdapter) Interrupt() bool   { return a.cli.Interrupt() }
-func (a *localCLIAdapter) Pid() int          { return a.cli.Pid() }
-func (a *localCLIAdapter) GetCacheBuilt() bool { return a.cli.CacheBuilt }
-func (a *localCLIAdapter) SetCacheBuilt(v bool) { a.cli.CacheBuilt = v }
-
-func WrapLocalCLI(cli *executor.StreamCLI) ChatCLI {
-	return &localCLIAdapter{cli: cli}
 }
 
 // WorkerClient 封裝對 CLI Worker 的 HTTP 呼叫

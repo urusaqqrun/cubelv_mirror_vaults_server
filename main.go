@@ -84,12 +84,15 @@ func main() {
 	chatHandler := api.NewChatHandler(pgStore, vaultFS)
 	chatHandler.RegisterRoutes(mux)
 
-	wsHandler := api.NewWsHandler(pgStore, pgStore, pgStore, cfg.VaultRoot, vaultFS)
-	if workerURL := os.Getenv("CLI_WORKER_URL"); workerURL != "" {
-		workerSecret := os.Getenv("INTERNAL_SECRET")
-		wsHandler.SetWorkerClient(api.NewWorkerClient(workerURL, workerSecret))
-		log.Printf("已啟用遠端 CLI Worker: %s", workerURL)
+	workerURL := os.Getenv("CLI_WORKER_URL")
+	if workerURL == "" {
+		log.Fatalf("CLI_WORKER_URL 未設定")
 	}
+	workerSecret := os.Getenv("INTERNAL_SECRET")
+	workerClient := api.NewWorkerClient(workerURL, workerSecret)
+	log.Printf("CLI Worker: %s", workerURL)
+
+	wsHandler := api.NewWsHandler(pgStore, pgStore, pgStore, cfg.VaultRoot, vaultFS, workerClient)
 	wsHandler.RegisterRoutes(mux)
 	chatHandler.SetWsHandler(wsHandler)
 
