@@ -47,9 +47,9 @@ type WsSession struct {
 	taskID           string
 	status           string // idle, asking, interrupted
 	mu               sync.Mutex
-	cli              *executor.StreamCLI
-	done             chan struct{} // 關閉時通知心跳 goroutine 停止
-	forgeToolCallIDs chan string   // plugin forge tool_call_id queue
+	cli              ChatCLI
+	done             chan struct{}
+	forgeToolCallIDs chan string
 }
 
 // Send writes a JSON message to the WebSocket connection (thread-safe).
@@ -90,6 +90,7 @@ type WsHandler struct {
 	sessions      sync.Map // sessionKey -> *WsSession
 	cliPool       sync.Map // memberID -> *warmCLI (warmup pool)
 	snapCache     sync.Map // memberID -> *cachedSnapshot
+	workerClient  *WorkerClient // 非 nil 時使用遠端 CLI Worker
 }
 
 // NewWsHandler creates a new WsHandler.
@@ -101,6 +102,15 @@ func NewWsHandler(chatStore ChatStore, snapshotStore SnapshotStore, itemWriter e
 		vaultRoot:     vaultRoot,
 		vaultFS:       vaultFS,
 	}
+}
+
+// SetWorkerClient 設定 CLI Worker 連線，啟用遠端模式
+func (h *WsHandler) SetWorkerClient(wc *WorkerClient) {
+	h.workerClient = wc
+}
+
+func (h *WsHandler) useRemote() bool {
+	return h.workerClient != nil
 }
 
 // BroadcastToMember 對指定 memberID 的所有 WS session 發送訊息
@@ -189,6 +199,20 @@ func (h *WsHandler) HandleWarmup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	model := r.URL.Query().Get("model")
+
+	if h.useRemote() {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if err := h.workerClient.Warmup(ctx, WarmupReq{MemberID: memberID, Model: model}); err != nil {
+				log.Printf("[Warmup-Remote] failed: member=%s err=%v", memberID, err)
+			}
+		}()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(200)
+		json.NewEncoder(w).Encode(map[string]string{"status": "warming"})
+		return
+	}
 
 	if val, ok := h.cliPool.Load(memberID); ok {
 		wc := val.(*warmCLI)
@@ -387,9 +411,18 @@ func (h *WsHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	go func() {
 		wsCliStart := time.Now()
+
+		if h.useRemote() {
+			remote := h.ensureRemoteCLI(session, !isNew)
+			if remote != nil {
+				log.Printf("[CacheProfile] WS goroutine: remote CLI ready — %dms, pid=%d",
+					time.Since(wsCliStart).Milliseconds(), remote.Pid())
+			}
+			return
+		}
+
 		workDir := filepath.Join(h.vaultRoot, memberID)
 
-		// 限制同一 user 最多 3 個活躍 CLI，超過時 kill 最舊的
 		h.enforceMaxCLIs(memberID, 3)
 
 		if isNew {
@@ -397,7 +430,7 @@ func (h *WsHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 				wc := val.(*warmCLI)
 				if wc.cli.IsAlive() && wc.model == model {
 					session.mu.Lock()
-					session.cli = wc.cli
+					session.cli = WrapLocalCLI(wc.cli)
 					session.mu.Unlock()
 					writeWSSessionBinding(workDir, wc.cli.Pid(), sessionID)
 					log.Printf("[CacheProfile] WS goroutine: reused warm CLI — %dms, model=%s, pid=%d",
@@ -418,7 +451,7 @@ func (h *WsHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			session.mu.Lock()
-			session.cli = cli
+			session.cli = WrapLocalCLI(cli)
 			session.mu.Unlock()
 			writeWSSessionBinding(workDir, cli.Pid(), sessionID)
 			log.Printf("[CacheProfile] WS goroutine: new CLI for new session — %dms, pid=%d",
@@ -469,7 +502,7 @@ func (h *WsHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				session.mu.Lock()
-				session.cli = cli
+				session.cli = WrapLocalCLI(cli)
 				session.mu.Unlock()
 				writeWSSessionBinding(workDir, cli.Pid(), sessionID)
 				log.Printf("[CacheProfile] WS goroutine: CLI resumed — total %dms, session=%s",
@@ -487,7 +520,7 @@ func (h *WsHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		session.mu.Lock()
-		session.cli = cli
+		session.cli = WrapLocalCLI(cli)
 		session.mu.Unlock()
 		writeWSSessionBinding(workDir, cli.Pid(), sessionID)
 		log.Printf("[CacheProfile] WS goroutine: new CLI (no history) — %dms, pid=%d",
@@ -608,7 +641,7 @@ func (h *WsHandler) handleMessage(session *WsSession, sessionKey string, msg map
 		"memberID": session.memberID,
 	})
 
-	isCacheBuilding := !cli.CacheBuilt
+	isCacheBuilding := !cli.GetCacheBuilt()
 	if isCacheBuilding {
 		session.Send(map[string]interface{}{
 			"type": "cli_preparing",
@@ -698,7 +731,7 @@ sendAndProcess:
 
 		if isCacheBuilding && !cliReadySent {
 			cliReadySent = true
-			cli.CacheBuilt = true
+			cli.SetCacheBuilt(true)
 			session.Send(map[string]interface{}{
 				"type": "cli_ready",
 			})
@@ -1002,24 +1035,39 @@ sendAndProcess:
 		}
 		session.mu.Unlock()
 
-		workDir := filepath.Join(h.vaultRoot, session.memberID)
-		if session.sessionID != "" {
-			executor.CleanupSessionJSONL(session.sessionID, workDir)
+		var fallbackCLI ChatCLI
+		if h.useRemote() {
+			fallbackCLI = h.ensureRemoteCLI(session, false)
+			if fallbackCLI == nil {
+				session.Send(map[string]interface{}{
+					"type":     "stream_error",
+					"memberID": session.memberID,
+					"error":    "remote fallback CLI error",
+				})
+			}
+		} else {
+			workDir := filepath.Join(h.vaultRoot, session.memberID)
+			if session.sessionID != "" {
+				executor.CleanupSessionJSONL(session.sessionID, workDir)
+			}
+			newCLI, newErr := executor.NewStreamCLI(workDir, "chat", session.memberID, session.sessionID, session.model, false, 5*time.Minute)
+			if newErr != nil {
+				log.Printf("[WS-CLI] fallback CLI start failed: %v", newErr)
+				session.Send(map[string]interface{}{
+					"type":     "stream_error",
+					"memberID": session.memberID,
+					"error":    fmt.Sprintf("fallback CLI error: %v", newErr),
+				})
+			} else {
+				fallbackCLI = WrapLocalCLI(newCLI)
+				session.mu.Lock()
+				session.cli = fallbackCLI
+				session.mu.Unlock()
+			}
 		}
 
-		newCLI, newErr := executor.NewStreamCLI(workDir, "chat", session.memberID, session.sessionID, session.model, false, 5*time.Minute)
-		if newErr != nil {
-			log.Printf("[WS-CLI] fallback CLI start failed: %v", newErr)
-			session.Send(map[string]interface{}{
-				"type":     "stream_error",
-				"memberID": session.memberID,
-				"error":    fmt.Sprintf("fallback CLI error: %v", newErr),
-			})
-		} else {
-			session.mu.Lock()
-			session.cli = newCLI
-			session.mu.Unlock()
-			cli = newCLI
+		if fallbackCLI != nil {
+			cli = fallbackCLI
 
 			historyCtx := h.buildResumeHistoryContext(session.sessionID, session.mode)
 			if historyCtx != "" {
@@ -1313,8 +1361,8 @@ func (h *WsHandler) enforceMaxCLIs(memberID string, maxCount int) {
 	}
 }
 
-// ensureCLI returns an alive StreamCLI, rebuilding with --resume if needed.
-func (h *WsHandler) ensureCLI(session *WsSession) *executor.StreamCLI {
+// ensureCLI returns an alive ChatCLI, rebuilding with --resume if needed.
+func (h *WsHandler) ensureCLI(session *WsSession) ChatCLI {
 	session.mu.Lock()
 	cli := session.cli
 	session.mu.Unlock()
@@ -1332,6 +1380,10 @@ func (h *WsHandler) ensureCLI(session *WsSession) *executor.StreamCLI {
 	}
 	session.mu.Unlock()
 
+	if h.useRemote() {
+		return h.ensureRemoteCLI(session, true)
+	}
+
 	workDir := filepath.Join(h.vaultRoot, session.memberID)
 
 	rebuildStart := time.Now()
@@ -1346,11 +1398,38 @@ func (h *WsHandler) ensureCLI(session *WsSession) *executor.StreamCLI {
 	}
 	log.Printf("[CacheProfile] NewStreamCLI DONE — %dms, pid=%d", time.Since(cliStart).Milliseconds(), newCLI.Pid())
 
+	var result ChatCLI = WrapLocalCLI(newCLI)
 	session.mu.Lock()
-	session.cli = newCLI
+	session.cli = result
 	session.mu.Unlock()
 
-	return newCLI
+	return result
+}
+
+// ensureRemoteCLI 透過 Worker Client 在遠端建立或復用 CLI
+func (h *WsHandler) ensureRemoteCLI(session *WsSession, isResume bool) ChatCLI {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	isNew := !isResume
+	resp, err := h.workerClient.CreateSession(ctx, CreateSessionReq{
+		MemberID:  session.memberID,
+		SessionID: session.sessionID,
+		Model:     session.model,
+		Mode:      session.mode,
+		IsNew:     isNew,
+	})
+	if err != nil {
+		log.Printf("[EnsureRemoteCLI] create session failed: %v", err)
+		return nil
+	}
+
+	remote := NewRemoteCLI(h.workerClient, session.memberID, session.sessionID, session.model, resp.Pid)
+	session.mu.Lock()
+	session.cli = remote
+	session.mu.Unlock()
+	log.Printf("[EnsureRemoteCLI] %s session=%s pid=%d", resp.Status, session.sessionID, resp.Pid)
+	return remote
 }
 
 // rebuildSessionJSONL queries chat messages from DB and writes the .jsonl file
@@ -1586,6 +1665,10 @@ func (h *WsHandler) executePluginForge(session *WsSession, memberID, forgeTitle,
 		}
 	}
 
+	if h.useRemote() {
+		return h.executePluginForgeRemote(session, memberID, forgeTitle, userPrompt, toolCallID, sendWS)
+	}
+
 	sendWS(map[string]interface{}{"type": "sub_agent_start", "title": forgeTitle})
 
 	vaultRoot := os.Getenv("VAULT_ROOT")
@@ -1785,6 +1868,106 @@ func (h *WsHandler) executePluginForge(session *WsSession, memberID, forgeTitle,
 	return map[string]interface{}{
 		"status": "success", "title": forgeTitle,
 		"pluginDir": pluginDir, "bundleHash": bundleHash,
+	}
+}
+
+// executePluginForgeRemote 透過 CLI Worker 執行 Forge，然後在本地做驗證和 DB 寫入
+func (h *WsHandler) executePluginForgeRemote(session *WsSession, memberID, forgeTitle, userPrompt, toolCallID string, sendWS func(map[string]interface{})) map[string]interface{} {
+	sendWS(map[string]interface{}{"type": "sub_agent_start", "title": forgeTitle})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	events, err := h.workerClient.ForgeSSE(ctx, ForgeReq{
+		MemberID:   memberID,
+		Title:      forgeTitle,
+		Prompt:     userPrompt,
+		ToolCallID: toolCallID,
+		ForgeType:  "ui",
+	})
+	if err != nil {
+		sendWS(map[string]interface{}{"type": "sub_agent_complete", "status": "error", "error": err.Error()})
+		return map[string]interface{}{"status": "error", "error": err.Error()}
+	}
+
+	var forgeResult struct {
+		PluginDir  string
+		BundleHash string
+		Error      string
+	}
+
+	for rawEvent := range events {
+		var ev struct {
+			Type    string                 `json:"type"`
+			Payload map[string]interface{} `json:"payload"`
+		}
+		if err := json.Unmarshal(rawEvent, &ev); err != nil {
+			continue
+		}
+		switch ev.Type {
+		case "forge_intent":
+			sendWS(map[string]interface{}{
+				"type":      "sub_agent_intent",
+				"tool_name": ev.Payload["tool"],
+			})
+		case "forge_complete":
+			forgeResult.PluginDir, _ = ev.Payload["pluginDir"].(string)
+			forgeResult.BundleHash, _ = ev.Payload["bundleHash"].(string)
+		case "error":
+			forgeResult.Error, _ = ev.Payload["message"].(string)
+		}
+	}
+
+	if forgeResult.Error != "" {
+		sendWS(map[string]interface{}{"type": "sub_agent_complete", "status": "error", "error": forgeResult.Error})
+		return map[string]interface{}{"status": "error", "error": forgeResult.Error}
+	}
+	if forgeResult.PluginDir == "" {
+		sendWS(map[string]interface{}{"type": "sub_agent_complete", "status": "error", "error": "forge produced no output"})
+		return map[string]interface{}{"status": "error", "error": "forge produced no output"}
+	}
+
+	// CLI Worker 已完成 CLI 執行和驗證，Mirror Server 負責 DB 寫入
+	sendWS(map[string]interface{}{"type": "sub_agent_intent", "step": "forge_register"})
+
+	idBytes := make([]byte, 12)
+	if _, err := cryptorand.Read(idBytes); err != nil {
+		errMsg := "failed to generate plugin ID"
+		sendWS(map[string]interface{}{"type": "sub_agent_complete", "status": "error", "error": errMsg})
+		return map[string]interface{}{"status": "error", "error": errMsg}
+	}
+	pluginID := hex.EncodeToString(idBytes)
+	pluginDoc := executor.Doc{
+		"_id": pluginID, "itemType": "PLUGIN", "name": forgeTitle,
+		"fields": map[string]interface{}{
+			"pluginDir": forgeResult.PluginDir, "bundleHash": forgeResult.BundleHash, "version": 1,
+			"status": "active", "description": forgeTitle,
+			"createdAt": time.Now().UnixMilli(), "updatedAt": time.Now().UnixMilli(),
+		},
+	}
+	if upsertErr := h.itemWriter.UpsertItem(context.Background(), memberID, pluginDoc); upsertErr != nil {
+		errMsg := fmt.Sprintf("寫入 PLUGIN item 失敗: %v", upsertErr)
+		sendWS(map[string]interface{}{"type": "sub_agent_complete", "status": "error", "error": errMsg})
+		return map[string]interface{}{"status": "error", "error": errMsg}
+	}
+
+	pluginJSON, _ := json.MarshalIndent(map[string]interface{}{
+		"_id": pluginID, "itemType": "PLUGIN", "name": forgeTitle,
+		"pluginDir": forgeResult.PluginDir, "bundleHash": forgeResult.BundleHash,
+		"version": 1, "status": "active", "description": forgeTitle,
+	}, "", "  ")
+	pluginJSONPath := filepath.Join(memberID, "PLUGIN", forgeResult.PluginDir+".json")
+	if writeErr := h.vaultFS.WriteFile(pluginJSONPath, pluginJSON); writeErr != nil {
+		log.Printf("[PluginForge-Remote] failed to write PLUGIN json to vault: %v", writeErr)
+	}
+
+	sendWS(map[string]interface{}{"type": "sub_agent_complete", "status": "success", "title": forgeTitle,
+		"plugin": map[string]interface{}{"id": pluginID, "pluginDir": forgeResult.PluginDir, "bundleHash": forgeResult.BundleHash}})
+	sendWS(map[string]interface{}{"type": "vault_changed"})
+
+	return map[string]interface{}{
+		"status": "success", "title": forgeTitle,
+		"pluginDir": forgeResult.PluginDir, "bundleHash": forgeResult.BundleHash,
 	}
 }
 
