@@ -12,7 +12,6 @@ import (
 	_ "github.com/lib/pq"
 	"github.com/redis/go-redis/v9"
 
-	"github.com/urusaqqrun/vault-mirror-service/executor"
 	"github.com/urusaqqrun/vault-mirror-service/model"
 )
 
@@ -89,7 +88,7 @@ func (s *PgStore) ListAllItems(ctx context.Context, userID string) ([]*model.Ite
 // 所有 Upsert 統一寫入 base_items + sync_changes
 // ---------------------------------------------------------------------------
 
-func (s *PgStore) UpsertItem(ctx context.Context, userID string, doc executor.Doc) error {
+func (s *PgStore) UpsertItem(ctx context.Context, userID string, doc map[string]interface{}) error {
 	id, _ := doc["_id"].(string)
 	if id == "" {
 		return fmt.Errorf("missing _id in doc")
