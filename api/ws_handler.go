@@ -1324,10 +1324,16 @@ func (h *WsHandler) executePluginForge(session *WsSession, memberID, forgeTitle,
 		}
 		switch ev.Type {
 		case "forge_intent":
-			sendWS(map[string]interface{}{
+			wsMsg := map[string]interface{}{
 				"type":      "sub_agent_intent",
 				"tool_name": ev.Payload["tool"],
-			})
+			}
+			for _, key := range []string{"file_path", "file_name", "command", "description", "pattern"} {
+				if v, ok := ev.Payload[key]; ok {
+					wsMsg[key] = v
+				}
+			}
+			sendWS(wsMsg)
 		case "forge_complete":
 			forgeResult.PluginDir, _ = ev.Payload["pluginDir"].(string)
 			forgeResult.BundleHash, _ = ev.Payload["bundleHash"].(string)
