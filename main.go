@@ -96,6 +96,13 @@ func main() {
 	wsHandler.RegisterRoutes(mux)
 	chatHandler.SetWsHandler(wsHandler)
 
+	serviceWorkerURL := os.Getenv("SERVICE_WORKER_URL")
+	if serviceWorkerURL != "" {
+		svcHandler := api.NewServiceHandler(cfg.VaultRoot, serviceWorkerURL, workerSecret)
+		svcHandler.RegisterRoutes(mux)
+		log.Printf("Service Worker: %s", serviceWorkerURL)
+	}
+
 	schemaHandler := api.NewSchemaHandler(vaultFS)
 	schemaHandler.RegisterRoutes(mux)
 
