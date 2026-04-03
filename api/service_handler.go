@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,7 +18,6 @@ import (
 	"time"
 )
 
-// ServiceHandler 處理 /svc/ 請求：manifest 認證 + Service Worker 啟動 + proxy
 type ServiceHandler struct {
 	vaultRoot     string
 	workerBaseURL string
@@ -28,11 +28,11 @@ type ServiceHandler struct {
 }
 
 type serviceEntry struct {
-	MemberID     string `json:"memberID"`
-	ServiceDir   string `json:"serviceDir"`
-	Port         int    `json:"port"`
-	Status       string `json:"status"`
-	LastActivity int64  `json:"lastActivity"`
+	MemberID     string
+	ServiceDir   string
+	Port         int
+	Status       string
+	LastEnsured  time.Time
 }
 
 type serviceManifest struct {
@@ -50,19 +50,20 @@ type manifestEndpoint struct {
 }
 
 func NewServiceHandler(vaultRoot, serviceWorkerURL, workerSecret string) *ServiceHandler {
-	return &ServiceHandler{
+	h := &ServiceHandler{
 		vaultRoot:     vaultRoot,
 		workerBaseURL: strings.TrimRight(serviceWorkerURL, "/"),
 		workerSecret:  workerSecret,
 		registry:      make(map[string]*serviceEntry),
 	}
+	go h.registryCleaner()
+	return h
 }
 
 func (h *ServiceHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/svc/", h.HandleSvcRequest)
 }
 
-// HandleSvcRequest: /svc/{memberID}/{serviceDir}/{endpoint...}
 func (h *ServiceHandler) HandleSvcRequest(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/svc/")
 	parts := strings.SplitN(path, "/", 3)
@@ -86,13 +87,14 @@ func (h *ServiceHandler) HandleSvcRequest(w http.ResponseWriter, r *http.Request
 	ep := findEndpoint(manifest, endpoint, r.Method)
 
 	if ep != nil && ep.Public {
-		if ep.WebhookSecretHeader != "" {
-			expected := ep.WebhookSecretValue
-			actual := r.Header.Get(ep.WebhookSecretHeader)
-			if actual == "" || actual != expected {
-				http.Error(w, "forbidden", http.StatusForbidden)
-				return
-			}
+		if ep.WebhookSecretHeader == "" || ep.WebhookSecretValue == "" {
+			http.Error(w, "service misconfigured: public endpoint requires webhook secret", http.StatusForbidden)
+			return
+		}
+		actual := r.Header.Get(ep.WebhookSecretHeader)
+		if subtle.ConstantTimeCompare([]byte(actual), []byte(ep.WebhookSecretValue)) != 1 {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
 		}
 	} else {
 		userID := r.Header.Get("X-User-ID")
@@ -102,15 +104,14 @@ func (h *ServiceHandler) HandleSvcRequest(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	port, err := h.ensureService(r.Context(), memberID, serviceDir)
+	err = h.ensureService(r.Context(), memberID, serviceDir)
 	if err != nil {
 		log.Printf("[ServiceHandler] ensure failed: %s/%s: %v", memberID, serviceDir, err)
-		http.Error(w, "service unavailable: "+err.Error(), http.StatusServiceUnavailable)
+		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 		return
 	}
 
-	proxyURL := fmt.Sprintf("%s/svc-proxy/%s/%s%s", h.workerBaseURL, memberID, serviceDir, endpoint)
-	h.proxyRequest(w, r, proxyURL, port)
+	h.proxyToWorker(w, r, memberID, serviceDir, endpoint)
 }
 
 func (h *ServiceHandler) loadManifest(memberID, serviceDir string) (*serviceManifest, error) {
@@ -129,31 +130,35 @@ func (h *ServiceHandler) loadManifest(memberID, serviceDir string) (*serviceMani
 func findEndpoint(m *serviceManifest, path, method string) *manifestEndpoint {
 	for i := range m.Endpoints {
 		ep := &m.Endpoints[i]
-		if strings.EqualFold(ep.Method, method) && ep.Path == path {
-			return ep
-		}
-		if ep.Method == "" && ep.Path == path {
+		if matchesMethod(ep.Method, method) && ep.Path == path {
 			return ep
 		}
 	}
 	for i := range m.Endpoints {
 		ep := &m.Endpoints[i]
-		if strings.HasPrefix(path, ep.Path) {
+		if matchesMethod(ep.Method, method) && strings.HasPrefix(path, ep.Path+"/") {
 			return ep
 		}
 	}
 	return nil
 }
 
-func (h *ServiceHandler) ensureService(ctx context.Context, memberID, serviceDir string) (int, error) {
+func matchesMethod(epMethod, reqMethod string) bool {
+	if epMethod == "" {
+		return true
+	}
+	return strings.EqualFold(epMethod, reqMethod)
+}
+
+func (h *ServiceHandler) ensureService(ctx context.Context, memberID, serviceDir string) error {
 	key := memberID + ":" + serviceDir
 
 	h.mu.RLock()
 	entry, exists := h.registry[key]
 	h.mu.RUnlock()
 
-	if exists && entry.Status == "running" {
-		return entry.Port, nil
+	if exists && entry.Status == "running" && time.Since(entry.LastEnsured) < 4*time.Minute {
+		return nil
 	}
 
 	reqBody, _ := json.Marshal(map[string]string{
@@ -163,7 +168,7 @@ func (h *ServiceHandler) ensureService(ctx context.Context, memberID, serviceDir
 
 	req, err := http.NewRequestWithContext(ctx, "POST", h.workerBaseURL+"/internal/service/ensure", bytes.NewReader(reqBody))
 	if err != nil {
-		return 0, err
+		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if h.workerSecret != "" {
@@ -173,13 +178,13 @@ func (h *ServiceHandler) ensureService(ctx context.Context, memberID, serviceDir
 	client := &http.Client{Timeout: 60 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return 0, err
+		return err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
 		body, _ := io.ReadAll(resp.Body)
-		return 0, fmt.Errorf("worker ensure → %d: %s", resp.StatusCode, string(body))
+		return fmt.Errorf("worker ensure → %d: %s", resp.StatusCode, string(body))
 	}
 
 	var result struct {
@@ -187,26 +192,26 @@ func (h *ServiceHandler) ensureService(ctx context.Context, memberID, serviceDir
 		Port   int    `json:"port"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return 0, err
+		return err
 	}
 
 	if result.Status == "starting" {
 		if err := h.waitForServiceReady(ctx, memberID, serviceDir, 45*time.Second); err != nil {
-			return 0, err
+			return err
 		}
 	}
 
 	h.mu.Lock()
 	h.registry[key] = &serviceEntry{
-		MemberID:     memberID,
-		ServiceDir:   serviceDir,
-		Port:         result.Port,
-		Status:       "running",
-		LastActivity: time.Now().Unix(),
+		MemberID:    memberID,
+		ServiceDir:  serviceDir,
+		Port:        result.Port,
+		Status:      "running",
+		LastEnsured: time.Now(),
 	}
 	h.mu.Unlock()
 
-	return result.Port, nil
+	return nil
 }
 
 func (h *ServiceHandler) waitForServiceReady(ctx context.Context, memberID, serviceDir string, timeout time.Duration) error {
@@ -222,7 +227,11 @@ func (h *ServiceHandler) waitForServiceReady(ctx context.Context, memberID, serv
 			"memberID":   memberID,
 			"serviceDir": serviceDir,
 		})
-		req, _ := http.NewRequestWithContext(ctx, "POST", h.workerBaseURL+"/internal/service/ensure", bytes.NewReader(reqBody))
+		req, err := http.NewRequestWithContext(ctx, "POST", h.workerBaseURL+"/internal/service/ensure", bytes.NewReader(reqBody))
+		if err != nil {
+			time.Sleep(1 * time.Second)
+			continue
+		}
 		req.Header.Set("Content-Type", "application/json")
 		if h.workerSecret != "" {
 			req.Header.Set("X-Internal-Secret", h.workerSecret)
@@ -252,21 +261,43 @@ func (h *ServiceHandler) waitForServiceReady(ctx context.Context, memberID, serv
 	return fmt.Errorf("service start timeout")
 }
 
-func (h *ServiceHandler) proxyRequest(w http.ResponseWriter, r *http.Request, targetURL string, _ int) {
-	target, err := url.Parse(targetURL)
+func (h *ServiceHandler) proxyToWorker(w http.ResponseWriter, r *http.Request, memberID, serviceDir, endpoint string) {
+	targetBase, err := url.Parse(h.workerBaseURL)
 	if err != nil {
-		http.Error(w, "invalid proxy target", http.StatusInternalServerError)
+		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
-	proxy := httputil.NewSingleHostReverseProxy(&url.URL{
-		Scheme: target.Scheme,
-		Host:   target.Host,
-	})
-	r.URL = target
-	r.Host = target.Host
+	proxy := httputil.NewSingleHostReverseProxy(targetBase)
+	proxy.ErrorHandler = func(rw http.ResponseWriter, req *http.Request, err error) {
+		log.Printf("[ServiceHandler] proxy error: %s/%s: %v", memberID, serviceDir, err)
+		key := memberID + ":" + serviceDir
+		h.mu.Lock()
+		delete(h.registry, key)
+		h.mu.Unlock()
+		http.Error(rw, "bad gateway", http.StatusBadGateway)
+	}
+
+	originalQuery := r.URL.RawQuery
+	r.URL.Path = fmt.Sprintf("/svc-proxy/%s/%s%s", memberID, serviceDir, endpoint)
+	r.URL.RawQuery = originalQuery
+	r.Host = targetBase.Host
 	if h.workerSecret != "" {
 		r.Header.Set("X-Internal-Secret", h.workerSecret)
 	}
 	proxy.ServeHTTP(w, r)
+}
+
+func (h *ServiceHandler) registryCleaner() {
+	ticker := time.NewTicker(2 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		h.mu.Lock()
+		for key, entry := range h.registry {
+			if time.Since(entry.LastEnsured) > 6*time.Minute {
+				delete(h.registry, key)
+			}
+		}
+		h.mu.Unlock()
+	}
 }

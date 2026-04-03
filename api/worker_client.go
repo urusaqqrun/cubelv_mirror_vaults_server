@@ -217,21 +217,26 @@ func (w *WorkerClient) ForgeSSE(ctx context.Context, req ForgeReq) (<-chan json.
 type RemoteCLI struct {
 	worker    *WorkerClient
 	memberID  string
-	sessionID string
-	model     string
-	alive     atomic.Bool
-	pid       int
-	mu        sync.Mutex
+	sessionID  string
+	model      string
+	alive      atomic.Bool
+	pid        int
+	mu         sync.Mutex
 	cacheBuilt bool
+	cancelCtx  context.Context
+	cancelFunc context.CancelFunc
 }
 
 func NewRemoteCLI(worker *WorkerClient, memberID, sessionID, model string, pid int) *RemoteCLI {
+	ctx, cancel := context.WithCancel(context.Background())
 	r := &RemoteCLI{
-		worker:    worker,
-		memberID:  memberID,
-		sessionID: sessionID,
-		model:     model,
-		pid:       pid,
+		worker:     worker,
+		memberID:   memberID,
+		sessionID:  sessionID,
+		model:      model,
+		pid:        pid,
+		cancelCtx:  ctx,
+		cancelFunc: cancel,
 	}
 	r.alive.Store(true)
 	return r
@@ -241,8 +246,7 @@ func (r *RemoteCLI) SendMessage(content interface{}) (<-chan executor.StreamEven
 	if !r.alive.Load() {
 		return nil, fmt.Errorf("remote CLI is not alive")
 	}
-	ctx := context.Background()
-	return r.worker.SendMessageSSE(ctx, SendMessageReq{
+	return r.worker.SendMessageSSE(r.cancelCtx, SendMessageReq{
 		MemberID:  r.memberID,
 		SessionID: r.sessionID,
 		Content:   content,
@@ -255,6 +259,7 @@ func (r *RemoteCLI) IsAlive() bool {
 
 func (r *RemoteCLI) Kill() {
 	r.alive.Store(false)
+	r.cancelFunc()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := r.worker.KillSession(ctx, KillReq{
