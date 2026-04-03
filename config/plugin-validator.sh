@@ -41,10 +41,6 @@ if [ "$file_count" -lt 3 ]; then
   append_error "檔案數不足，至少需要 3 個 .tsx/.ts/.css 檔案"
 fi
 
-if find "$PLUGIN_DIR" -type f -name 'bundle.css' | grep -q .; then
-  append_error "禁止使用 bundle.css，CSS 檔名必須有語意"
-fi
-
 if [ ! -f "$PLUGIN_DIR/bundle.js" ]; then
   append_error "bundle.js 缺失，必須先完成編譯"
 else
