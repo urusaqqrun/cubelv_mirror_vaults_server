@@ -111,7 +111,6 @@ func (h *WsHandler) BroadcastToMember(memberID string, msg map[string]interface{
 // RegisterRoutes registers the WebSocket route on the provided mux.
 func (h *WsHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/ws/chat", h.HandleWebSocket)
-	mux.HandleFunc("POST /cli_warmup", h.HandleWarmup)
 	mux.HandleFunc("POST /api/internal/forge", h.HandleForgeAPI)
 }
 
@@ -172,29 +171,6 @@ func (h *WsHandler) HandleForgeAPI(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(result)
-}
-
-// HandleWarmup pre-warms a CLI process into the pool.
-// 認證由 Nginx auth_request 處理，memberID 從 X-User-ID header 取得。
-func (h *WsHandler) HandleWarmup(w http.ResponseWriter, r *http.Request) {
-	memberID := r.Header.Get("X-User-ID")
-	if memberID == "" {
-		http.Error(w, "unauthorized", 401)
-		return
-	}
-	model := r.URL.Query().Get("model")
-
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		if err := h.workerClient.Warmup(ctx, WarmupReq{MemberID: memberID, Model: model}); err != nil {
-			log.Printf("[Warmup] failed: member=%s err=%v", memberID, err)
-		}
-	}()
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(200)
-	json.NewEncoder(w).Encode(map[string]string{"status": "warming"})
 }
 
 // HandleWebSocket upgrades an HTTP connection to WebSocket and starts the read loop.

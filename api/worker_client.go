@@ -104,15 +104,6 @@ func (w *WorkerClient) CreateSession(ctx context.Context, req CreateSessionReq) 
 	return &resp, nil
 }
 
-type WarmupReq struct {
-	MemberID string `json:"memberID"`
-	Model    string `json:"model"`
-}
-
-func (w *WorkerClient) Warmup(ctx context.Context, req WarmupReq) error {
-	return w.doJSON(ctx, "POST", "/internal/warmup", req, nil)
-}
-
 type InterruptReq struct {
 	MemberID  string `json:"memberID"`
 	SessionID string `json:"sessionID"`
