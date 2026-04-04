@@ -59,10 +59,7 @@ func (r *PathResolver) ResolvePath(itemID string) (string, error) {
 	parts, err := r.buildPathParts(itemID, make(map[string]bool))
 	r.mu.RUnlock()
 	if err != nil {
-		if errors.Is(err, errNodeNotFoundInTree) {
-			return "_unsorted", nil
-		}
-		return "", err
+		return "_unsorted", nil
 	}
 
 	result := filepath.Join(parts...)
@@ -114,8 +111,7 @@ func (r *PathResolver) buildPathParts(nodeID string, visited map[string]bool) ([
 	name := sanitizeName(baseName)
 
 	if node.ParentID == nil || *node.ParentID == "" {
-		typeName := resolveTypeFromItemType(node.ItemType)
-		return []string{typeName, name}, nil
+		return []string{"_unsorted", name}, nil
 	}
 
 	parentParts, err := r.buildPathParts(*node.ParentID, visited)

@@ -73,7 +73,7 @@ func (e *Exporter) ExportItem(userId string, item *model.Item) (ExportItemResult
 // ResolveParentDir returns the directory path where an item's .json should be written.
 func (e *Exporter) ResolveParentDir(userID, parentID, itemType string) string {
 	if parentID == "" {
-		return filepath.Join(userID, resolveTypeFromItemType(itemType))
+		return filepath.Join(userID, "_unsorted")
 	}
 
 	resolvedPath, err := e.resolver.ResolvePath(parentID)

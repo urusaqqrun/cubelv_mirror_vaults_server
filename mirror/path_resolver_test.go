@@ -14,8 +14,8 @@ func TestResolvePath_TopLevel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != "NOTE/工作" {
-		t.Errorf("got %q, want %q", got, "NOTE/工作")
+	if got != "_unsorted/工作" {
+		t.Errorf("got %q, want %q", got, "_unsorted/工作")
 	}
 }
 
@@ -28,8 +28,8 @@ func TestResolvePath_Nested(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != "NOTE/工作/會議紀錄" {
-		t.Errorf("got %q, want %q", got, "NOTE/工作/會議紀錄")
+	if got != "_unsorted/工作/會議紀錄" {
+		t.Errorf("got %q, want %q", got, "_unsorted/工作/會議紀錄")
 	}
 }
 
@@ -43,8 +43,8 @@ func TestResolvePath_DeeplyNested(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != "NOTE/工作/專案/前端" {
-		t.Errorf("got %q, want %q", got, "NOTE/工作/專案/前端")
+	if got != "_unsorted/工作/專案/前端" {
+		t.Errorf("got %q, want %q", got, "_unsorted/工作/專案/前端")
 	}
 }
 
@@ -54,11 +54,11 @@ func TestResolvePath_DifferentTypes(t *testing.T) {
 		node     TreeNode
 		expected string
 	}{
-		{"CARD root", TreeNode{ID: "c1", Name: "讀書卡片", ItemType: "CARD_FOLDER", ParentID: nil}, "CARD/讀書卡片"},
-		{"CHART root", TreeNode{ID: "ch1", Name: "月報圖表", ItemType: "CHART_FOLDER", ParentID: nil}, "CHART/月報圖表"},
-		{"TODO root", TreeNode{ID: "t1", Name: "待辦清單", ItemType: "TODO", ParentID: nil}, "TODO/待辦清單"},
-		{"NOTE root", TreeNode{ID: "n1", Name: "筆記", ItemType: "NOTE", ParentID: nil}, "NOTE/筆記"},
-		{"empty type defaults to NOTE", TreeNode{ID: "e1", Name: "雜記", ItemType: "", ParentID: nil}, "NOTE/雜記"},
+		{"CARD root", TreeNode{ID: "c1", Name: "讀書卡片", ItemType: "CARD_FOLDER", ParentID: nil}, "_unsorted/讀書卡片"},
+		{"CHART root", TreeNode{ID: "ch1", Name: "月報圖表", ItemType: "CHART_FOLDER", ParentID: nil}, "_unsorted/月報圖表"},
+		{"TODO root", TreeNode{ID: "t1", Name: "待辦清單", ItemType: "TODO", ParentID: nil}, "_unsorted/待辦清單"},
+		{"NOTE root", TreeNode{ID: "n1", Name: "筆記", ItemType: "NOTE", ParentID: nil}, "_unsorted/筆記"},
+		{"empty type defaults to _unsorted", TreeNode{ID: "e1", Name: "雜記", ItemType: "", ParentID: nil}, "_unsorted/雜記"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -92,9 +92,25 @@ func TestResolvePath_CircularReference(t *testing.T) {
 		{ID: "f1", Name: "A", ItemType: "NOTE", ParentID: strPtr("f2")},
 		{ID: "f2", Name: "B", ItemType: "NOTE", ParentID: strPtr("f1")},
 	})
-	_, err := r.ResolvePath("f1")
-	if err == nil {
-		t.Error("expected error for circular reference, got nil")
+	got, err := r.ResolvePath("f1")
+	if err != nil {
+		t.Fatalf("circular ref should fallback to _unsorted, got error: %v", err)
+	}
+	if got != "_unsorted" {
+		t.Errorf("got %q, want %q", got, "_unsorted")
+	}
+}
+
+func TestResolvePath_SelfReference(t *testing.T) {
+	r := NewPathResolver([]TreeNode{
+		{ID: "f1", Name: "Self", ItemType: "TODO", ParentID: strPtr("f1")},
+	})
+	got, err := r.ResolvePath("f1")
+	if err != nil {
+		t.Fatalf("self-ref should fallback to _unsorted, got error: %v", err)
+	}
+	if got != "_unsorted" {
+		t.Errorf("got %q, want %q", got, "_unsorted")
 	}
 }
 
@@ -132,8 +148,8 @@ func TestAddNode_UpdatesTree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != "NOTE/工作/新專案" {
-		t.Errorf("got %q, want %q", got, "NOTE/工作/新專案")
+	if got != "_unsorted/工作/新專案" {
+		t.Errorf("got %q, want %q", got, "_unsorted/工作/新專案")
 	}
 }
 
@@ -164,8 +180,8 @@ func TestUpdateNode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != "NOTE/工作/新名" {
-		t.Errorf("got %q, want %q", got, "NOTE/工作/新名")
+	if got != "_unsorted/工作/新名" {
+		t.Errorf("got %q, want %q", got, "_unsorted/工作/新名")
 	}
 }
 
@@ -178,8 +194,8 @@ func TestResolvePath_SpecialCharactersInName(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 斜線應被替換，避免路徑衝突
-	if got != "NOTE/工作_專案" {
-		t.Errorf("got %q, want %q", got, "NOTE/工作_專案")
+	if got != "_unsorted/工作_專案" {
+		t.Errorf("got %q, want %q", got, "_unsorted/工作_專案")
 	}
 }
 
@@ -191,8 +207,8 @@ func TestResolvePath_EmptyName_UsesID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != "NOTE/f1" {
-		t.Errorf("got %q, want %q", got, "NOTE/f1")
+	if got != "_unsorted/f1" {
+		t.Errorf("got %q, want %q", got, "_unsorted/f1")
 	}
 }
 
@@ -210,7 +226,7 @@ func TestResolvePath_CacheInvalidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != "NOTE/生活/子目錄" {
-		t.Errorf("cache not invalidated: got %q, want %q", got, "NOTE/生活/子目錄")
+	if got != "_unsorted/生活/子目錄" {
+		t.Errorf("cache not invalidated: got %q, want %q", got, "_unsorted/生活/子目錄")
 	}
 }
