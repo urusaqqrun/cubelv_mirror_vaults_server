@@ -74,6 +74,49 @@ func (h *SchemaHandler) SyncSchemas(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// migrateOldClaudeMD detects per-user CLAUDE.md files that contain stale vault
+// instructions (from the era when full instructions were written into the user
+// file instead of the global template). It extracts the three marker blocks and
+// rebuilds a clean file with only user-specific data.
+func migrateOldClaudeMD(content string) (string, bool) {
+	if !strings.Contains(content, "NoteCEO") {
+		return content, false
+	}
+
+	extractBlock := func(s, startMarker, endMarker string) string {
+		si := strings.Index(s, startMarker)
+		ei := strings.Index(s, endMarker)
+		if si >= 0 && ei >= 0 && ei > si {
+			return s[si : ei+len(endMarker)]
+		}
+		return ""
+	}
+
+	localeBlock := extractBlock(content, "<!-- LOCALE:START -->", "<!-- LOCALE:END -->")
+	aihintsBlock := extractBlock(content, "<!-- AIHINTS:START -->", "<!-- AIHINTS:END -->")
+	memoryBlock := extractBlock(content, "<!-- AI_MEMORY:START -->", "<!-- AI_MEMORY:END -->")
+
+	if aihintsBlock == "" {
+		aihintsBlock = "<!-- AIHINTS:START -->\n<!-- AIHINTS:END -->"
+	}
+	if memoryBlock == "" {
+		memoryBlock = "<!-- AI_MEMORY:START -->\n<!-- AI_MEMORY:END -->"
+	}
+
+	var b strings.Builder
+	b.WriteString("# 用戶個人化設定\n\n")
+	if localeBlock != "" {
+		b.WriteString(localeBlock)
+		b.WriteString("\n\n")
+	}
+	b.WriteString(aihintsBlock)
+	b.WriteString("\n\n")
+	b.WriteString(memoryBlock)
+	b.WriteString("\n")
+
+	return b.String(), true
+}
+
 // updateUserClaudeMD updates the user-level CLAUDE.md in the vault with aiHints.
 // It reads ALL .schemas/*.json files to rebuild the complete AIHINTS section,
 // ensuring hints from other schema types are preserved across individual pushes.
@@ -147,6 +190,11 @@ func updateUserClaudeMD(vaultFS mirror.VaultFS, memberID string) {
 	}
 
 	content := string(existing)
+
+	if migrated, changed := migrateOldClaudeMD(content); changed {
+		content = migrated
+		log.Printf("[SchemaHandler] migrated old NoteCEO CLAUDE.md for %s", memberID)
+	}
 
 	// Replace content between AIHINTS markers
 	startMarker := "<!-- AIHINTS:START -->"
