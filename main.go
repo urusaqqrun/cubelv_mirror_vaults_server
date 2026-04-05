@@ -71,6 +71,9 @@ func main() {
 	worker.SetOwnerScanLimit(cfg.SyncOwnerScanLimit)
 	worker.SetChangeBatchSize(cfg.SyncChangeBatchSize)
 
+	// === 一次性遷移：Vault 檔名改造 {name}_{id}.json（完成後刪除此段） ===
+	migrateAllVaults(ctx, vaultFS, pgStore, cfg.VaultRoot)
+
 	// WorkerClient（僅 Rebuild，用於 VaultSyncHandler 觸發插件編譯）
 	var workerClient *api.WorkerClient
 	workerURL := os.Getenv("CLI_WORKER_URL")
@@ -184,4 +187,43 @@ func getHostname() string {
 		return fmt.Sprintf("unknown-%d", time.Now().UnixNano()%10000)
 	}
 	return h
+}
+
+// migrateAllVaults 一次性遷移：掃描 EFS 根目錄的所有用戶 → ExportFullVault 重建
+// 完成後請刪除此函式及 main() 裡的呼叫
+func migrateAllVaults(ctx context.Context, vaultFS mirror.VaultFS, reader vaultsync.FullExporter, vaultRoot string) {
+	log.Println("[Migration] 開始全量 Vault 檔名遷移 (name_id format)")
+	start := time.Now()
+
+	entries, err := os.ReadDir(vaultRoot)
+	if err != nil {
+		log.Printf("[Migration] 讀取 vault root 失敗: %v", err)
+		return
+	}
+
+	var userDirs []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if name == "" || name[0] == '.' {
+			continue
+		}
+		userDirs = append(userDirs, name)
+	}
+	log.Printf("[Migration] 找到 %d 個用戶目錄", len(userDirs))
+
+	var success, failed int
+	for _, userID := range userDirs {
+		if err := vaultsync.ExportFullVault(ctx, vaultFS, reader, userID); err != nil {
+			log.Printf("[Migration] 用戶 %s 重建失敗: %v", userID, err)
+			failed++
+		} else {
+			success++
+		}
+	}
+
+	log.Printf("[Migration] 全量遷移完成: %d 成功, %d 失敗, 耗時 %v",
+		success, failed, time.Since(start))
 }
