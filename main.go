@@ -71,9 +71,6 @@ func main() {
 	worker.SetOwnerScanLimit(cfg.SyncOwnerScanLimit)
 	worker.SetChangeBatchSize(cfg.SyncChangeBatchSize)
 
-	// === 一次性遷移 v2：EFS 全量清除 + 重建所有用戶 vault（完成後刪除） ===
-	migrateAllVaultsV2(ctx, cfg.VaultRoot, vaultFS, pgStore)
-
 	// WorkerClient（僅 Rebuild，用於 VaultSyncHandler 觸發插件編譯）
 	var workerClient *api.WorkerClient
 	workerURL := os.Getenv("CLI_WORKER_URL")
@@ -189,56 +186,4 @@ func getHostname() string {
 	return h
 }
 
-// migrateAllVaultsV2 EFS 全量清除 + 重建（完成後刪除此函式）
-func migrateAllVaultsV2(ctx context.Context, vaultRoot string, vaultFS mirror.VaultFS, pgStore *database.PgStore) {
-	log.Println("[Migration-v2] EFS 全量清除 + 重建開始")
-	start := time.Now()
-
-	entries, err := os.ReadDir(vaultRoot)
-	if err != nil {
-		log.Printf("[Migration-v2] 讀取 vault root 失敗: %v", err)
-		return
-	}
-
-	var userDirs []string
-	for _, e := range entries {
-		if !e.IsDir() || e.Name() == "" || e.Name()[0] == '.' {
-			continue
-		}
-		userDirs = append(userDirs, e.Name())
-	}
-	log.Printf("[Migration-v2] 找到 %d 個用戶目錄，開始清除", len(userDirs))
-
-	// Phase 1: 用 os.RemoveAll 強制刪除所有用戶目錄
-	for _, uid := range userDirs {
-		fullPath := vaultRoot + "/" + uid
-		if err := os.RemoveAll(fullPath); err != nil {
-			log.Printf("[Migration-v2] os.RemoveAll %s 失敗: %v — 重試", uid, err)
-			time.Sleep(500 * time.Millisecond)
-			_ = os.RemoveAll(fullPath)
-		}
-	}
-	log.Println("[Migration-v2] 所有用戶目錄已清除")
-
-	// Phase 2: 逐一重建
-	var success, failed int
-	for _, uid := range userDirs {
-		if err := vaultsync.ExportFullVault(ctx, vaultFS, pgStore, uid); err != nil {
-			log.Printf("[Migration-v2] 用戶 %s 重建失敗: %v", uid, err)
-			failed++
-		} else {
-			success++
-		}
-	}
-
-	// Phase 3: 重置所有 sync cursor
-	if err := pgStore.ResetAllSyncCursors(ctx); err != nil {
-		log.Printf("[Migration-v2] 重置 cursor 失敗: %v", err)
-	} else {
-		log.Println("[Migration-v2] 所有 sync cursor 已重置")
-	}
-
-	log.Printf("[Migration-v2] 完成: %d 成功, %d 失敗, 耗時 %v",
-		success, failed, time.Since(start))
-}
 

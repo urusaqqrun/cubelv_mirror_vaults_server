@@ -200,12 +200,6 @@ func (s *PgStore) RecordCursorError(ctx context.Context, ownerUserID, leaseOwner
 	return nil
 }
 
-// ResetAllSyncCursors 清空所有 sync cursor（遷移用，完成後刪除）
-func (s *PgStore) ResetAllSyncCursors(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM mirror_sync_cursor`)
-	return err
-}
-
 func (s *PgStore) GetBacklogStats(ctx context.Context) (vaultsync.BacklogStats, error) {
 	row := s.db.QueryRowContext(ctx,
 		`WITH owner_progress AS (
