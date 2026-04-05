@@ -75,7 +75,7 @@
                 },
                 {
                     "name": "SERVICE_WORKER_URL",
-                    "value": "http://service-worker.svc.local:9091"
+                    "value": "http://plugin-runtime.svc.local:9091"
                 }
             ],
             "secrets": [
