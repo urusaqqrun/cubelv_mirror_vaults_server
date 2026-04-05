@@ -207,6 +207,7 @@ func (s *PgStore) MergeDuplicateSystemFolders(ctx context.Context) ([]string, er
 		userID     string
 		folderID   string
 		childCount int
+		deleted    bool
 	}
 
 	affectedUsers := make(map[string]bool)
@@ -220,11 +221,12 @@ func (s *PgStore) MergeDuplicateSystemFolders(ctx context.Context) ([]string, er
 			       (SELECT COUNT(*) FROM base_items c
 			        JOIN item_permissions cp ON cp.item_id = c.id AND cp.permission = 'owner'
 			        WHERE cp.user_id = ip.user_id
-			        AND c.fields::jsonb->>'parentID' = bi.id
-			        AND c.deleted_at IS NULL) AS child_count
+			        AND c.fields->>'parentID' = bi.id
+			        AND c.deleted_at IS NULL) AS child_count,
+			       (bi.deleted_at IS NOT NULL) AS is_deleted
 			FROM base_items bi
 			JOIN item_permissions ip ON ip.item_id = bi.id AND ip.permission = 'owner'
-			WHERE bi.name = $1 AND bi.item_type = $2 AND bi.deleted_at IS NULL
+			WHERE bi.name = $1 AND bi.item_type = $2
 			ORDER BY ip.user_id, child_count DESC, bi.created_at ASC`,
 			sys.name, sys.itemType)
 		if err != nil {
@@ -234,7 +236,7 @@ func (s *PgStore) MergeDuplicateSystemFolders(ctx context.Context) ([]string, er
 		userFolders := make(map[string][]folderRow)
 		for rows.Next() {
 			var r folderRow
-			if err := rows.Scan(&r.userID, &r.folderID, &r.childCount); err != nil {
+			if err := rows.Scan(&r.userID, &r.folderID, &r.childCount, &r.deleted); err != nil {
 				rows.Close()
 				return nil, err
 			}
@@ -243,38 +245,61 @@ func (s *PgStore) MergeDuplicateSystemFolders(ctx context.Context) ([]string, er
 		rows.Close()
 
 		for userID, folders := range userFolders {
-			if len(folders) <= 1 {
+			var alive []folderRow
+			for _, f := range folders {
+				if !f.deleted {
+					alive = append(alive, f)
+				}
+			}
+			if len(alive) == 0 {
 				continue
 			}
-			canonical := folders[0]
-			log.Printf("[MergeInbox] user=%s type=%s canonical=%s (%d children), duplicates=%d",
-				userID, sys.name, canonical.folderID, canonical.childCount, len(folders)-1)
+			canonical := alive[0]
 
-			for _, dup := range folders[1:] {
+			needsWork := false
+			for _, f := range folders {
+				if f.folderID != canonical.folderID && (f.childCount > 0 || !f.deleted) {
+					needsWork = true
+					break
+				}
+			}
+			if !needsWork {
+				continue
+			}
+
+			log.Printf("[MergeInbox] user=%s type=%s canonical=%s (%d children), total_folders=%d",
+				userID, sys.name, canonical.folderID, canonical.childCount, len(folders))
+
+			for _, dup := range folders {
+				if dup.folderID == canonical.folderID {
+					continue
+				}
 				if dup.childCount > 0 {
 					res, err := s.db.ExecContext(ctx, `
 						UPDATE base_items
-						SET fields = jsonb_set(fields::jsonb, '{parentID}', to_jsonb($1::text))::text,
+						SET fields = jsonb_set(fields, '{parentID}', to_jsonb($1::text)),
 						    updated_at = $4
 						WHERE id IN (
 							SELECT c.id FROM base_items c
 							JOIN item_permissions cp ON cp.item_id = c.id AND cp.permission = 'owner'
 							WHERE cp.user_id = $2
-							AND c.fields::jsonb->>'parentID' = $3
+							AND c.fields->>'parentID' = $3
 							AND c.deleted_at IS NULL
 						)`, canonical.folderID, userID, dup.folderID, time.Now().UnixMilli())
 					if err != nil {
-						log.Printf("[MergeInbox] move children %s→%s error: %v", dup.folderID, canonical.folderID, err)
+						log.Printf("[MergeInbox] move children %s->%s error: %v", dup.folderID, canonical.folderID, err)
 					} else if n, _ := res.RowsAffected(); n > 0 {
 						log.Printf("[MergeInbox]   moved %d children from %s to %s", n, dup.folderID, canonical.folderID)
 					}
 				}
-				_, err := s.db.ExecContext(ctx, `UPDATE base_items SET deleted_at = $1 WHERE id = $2`,
-					time.Now().UnixMilli(), dup.folderID)
-				if err != nil {
-					log.Printf("[MergeInbox] delete dup %s error: %v", dup.folderID, err)
-				} else {
-					log.Printf("[MergeInbox]   deleted duplicate %s", dup.folderID)
+				if !dup.deleted {
+					_, err := s.db.ExecContext(ctx, `UPDATE base_items SET deleted_at = $1 WHERE id = $2`,
+						time.Now().UnixMilli(), dup.folderID)
+					if err != nil {
+						log.Printf("[MergeInbox] delete dup %s error: %v", dup.folderID, err)
+					} else {
+						log.Printf("[MergeInbox]   deleted duplicate %s", dup.folderID)
+					}
 				}
 			}
 			affectedUsers[userID] = true
