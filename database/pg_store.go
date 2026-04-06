@@ -62,7 +62,7 @@ func (s *PgStore) GetItem(ctx context.Context, userID, itemID string) (*model.It
 		`SELECT bi.id, bi.item_type, bi.name, bi.fields, bi.version, bi.created_at, bi.updated_at
 		 FROM base_items bi
 		 JOIN item_permissions ip ON ip.item_id = bi.id AND ip.permission = 'owner'
-		 WHERE bi.id = $1 AND ip.user_id = $2 AND bi.deleted_at IS NULL`,
+		 WHERE bi.id = $1 AND ip.user_id = $2`,
 		itemID, userID,
 	)
 	return s.scanItem(row)
@@ -73,7 +73,7 @@ func (s *PgStore) ListAllItems(ctx context.Context, userID string) ([]*model.Ite
 		`SELECT bi.id, bi.item_type, bi.name, bi.fields, bi.version, bi.created_at, bi.updated_at
 		 FROM base_items bi
 		 JOIN item_permissions ip ON ip.item_id = bi.id AND ip.permission = 'owner'
-		 WHERE ip.user_id = $1 AND bi.deleted_at IS NULL`,
+		 WHERE ip.user_id = $1`,
 		userID,
 	)
 	if err != nil {
@@ -196,26 +196,34 @@ func (s *PgStore) DeleteItemDoc(ctx context.Context, userID, docID string, versi
 	}
 	defer tx.Rollback()
 
-	result, err := tx.ExecContext(ctx,
-		`UPDATE base_items SET deleted_at = $1, version = $2, updated_at = $1
-		 WHERE id = $3 AND deleted_at IS NULL
-		 AND EXISTS (SELECT 1 FROM item_permissions WHERE item_id = $3 AND user_id = $4 AND permission = 'owner')`,
-		now, version, docID, userID,
-	)
+	var exists bool
+	err = tx.QueryRowContext(ctx,
+		`SELECT EXISTS (SELECT 1 FROM base_items WHERE id = $1
+		 AND EXISTS (SELECT 1 FROM item_permissions WHERE item_id = $1 AND user_id = $2 AND permission = 'owner'))`,
+		docID, userID,
+	).Scan(&exists)
 	if err != nil {
-		return fmt.Errorf("soft delete: %w", err)
+		return fmt.Errorf("check existence: %w", err)
+	}
+	if !exists {
+		return nil
 	}
 
-	affected, _ := result.RowsAffected()
-	if affected > 0 {
-		_, err = tx.ExecContext(ctx,
-			`INSERT INTO sync_changes (item_id, item_version, change_type, actor_id, details, created_at)
-			 VALUES ($1, $2, 'deleted', $3, 'mirror-service writeback', $4)`,
-			docID, version, userID, now,
-		)
-		if err != nil {
-			return fmt.Errorf("insert sync_changes for delete: %w", err)
-		}
+	_, err = tx.ExecContext(ctx,
+		`INSERT INTO sync_changes (item_id, item_version, change_type, actor_id, details, created_at)
+		 VALUES ($1, $2, 'deleted', $3, 'mirror-service writeback', $4)`,
+		docID, version, userID, now,
+	)
+	if err != nil {
+		return fmt.Errorf("insert sync_changes for delete: %w", err)
+	}
+
+	_, err = tx.ExecContext(ctx,
+		`DELETE FROM base_items WHERE id = $1`,
+		docID,
+	)
+	if err != nil {
+		return fmt.Errorf("hard delete: %w", err)
 	}
 
 	return tx.Commit()
