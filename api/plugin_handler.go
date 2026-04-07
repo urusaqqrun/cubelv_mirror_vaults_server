@@ -165,7 +165,7 @@ func (h *PluginHandler) HandleDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if h.serviceHandler != nil {
-		h.serviceHandler.RemoveFromRegistry(memberID, pluginDir)
+		h.serviceHandler.StopAndRemove(memberID, pluginDir)
 	}
 
 	if h.projector != nil {
@@ -183,7 +183,7 @@ func (h *PluginHandler) HandleDelete(w http.ResponseWriter, r *http.Request) {
 
 	// Git commit 刪除結果
 	if h.gitHandler != nil {
-		if hash, err := h.gitHandler.Commit(memberID, "delete: "+pluginDir, "system"); err != nil {
+		if hash, err := h.gitHandler.Commit(memberID, pluginDir, "delete: "+pluginDir, "system"); err != nil {
 			log.Printf("[PluginHandler] git commit failed: %v", err)
 		} else if hash != "" {
 			log.Printf("[PluginHandler] git commit: %s", hash)
@@ -208,8 +208,10 @@ func (h *PluginHandler) HandleBundleDownload(w http.ResponseWriter, r *http.Requ
 
 	memberID := r.URL.Query().Get("memberID")
 	pluginDir := r.URL.Query().Get("plugin")
+	log.Printf("[PluginHandler-DIAG] bundle request: memberID=%s plugin=%s", memberID, pluginDir)
 
 	if memberID == "" || pluginDir == "" {
+		log.Printf("[PluginHandler-DIAG] bundle rejected: missing params")
 		http.Error(w, "missing memberID or plugin parameter", http.StatusBadRequest)
 		return
 	}
@@ -217,18 +219,36 @@ func (h *PluginHandler) HandleBundleDownload(w http.ResponseWriter, r *http.Requ
 	// Sanitize plugin dir name
 	pluginDir = filepath.Base(pluginDir)
 	if pluginDir == "." || pluginDir == ".." || strings.Contains(pluginDir, "/") {
+		log.Printf("[PluginHandler-DIAG] bundle rejected: invalid plugin dir after sanitize: %q", pluginDir)
 		http.Error(w, "invalid plugin name", http.StatusBadRequest)
 		return
 	}
 
 	bundlePath := filepath.Join(memberID, "plugins", pluginDir, "frontend", "bundle.js")
+	log.Printf("[PluginHandler-DIAG] reading bundle: path=%s exists=%v", bundlePath, h.vaultFS.Exists(bundlePath))
 	data, err := h.vaultFS.ReadFile(bundlePath)
 	if err != nil {
-		log.Printf("[PluginHandler] bundle not found: member=%s plugin=%s err=%v", memberID, pluginDir, err)
+		log.Printf("[PluginHandler-DIAG] bundle NOT FOUND: member=%s plugin=%s path=%s err=%v", memberID, pluginDir, bundlePath, err)
+		// 列出 plugins/{dir}/frontend/ 確認
+		feDir := filepath.Join(memberID, "plugins", pluginDir, "frontend")
+		if entries, dirErr := h.vaultFS.ListDir(feDir); dirErr == nil {
+			names := make([]string, 0, len(entries))
+			for _, e := range entries {
+				names = append(names, e.Name())
+			}
+			log.Printf("[PluginHandler-DIAG] frontend dir listing: %v", names)
+		} else {
+			log.Printf("[PluginHandler-DIAG] cannot list frontend dir %s: %v", feDir, dirErr)
+		}
+		// 也檢查 plugins/{dir} 本身
+		pluginRoot := filepath.Join(memberID, "plugins", pluginDir)
+		log.Printf("[PluginHandler-DIAG] plugin root exists=%v, plugins/ exists=%v",
+			h.vaultFS.Exists(pluginRoot), h.vaultFS.Exists(filepath.Join(memberID, "plugins")))
 		http.Error(w, "bundle not found", http.StatusNotFound)
 		return
 	}
 
+	log.Printf("[PluginHandler-DIAG] bundle served: member=%s plugin=%s size=%d", memberID, pluginDir, len(data))
 	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Write(data)

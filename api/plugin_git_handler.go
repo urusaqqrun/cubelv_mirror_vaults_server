@@ -17,7 +17,8 @@ import (
 	vaultsync "github.com/urusaqqrun/vault-mirror-service/sync"
 )
 
-// PluginGitHandler manages Git repositories in users' plugins/ directories.
+// PluginGitHandler manages per-plugin Git repositories.
+// Each plugin has its own independent .git/ under plugins/{pluginDir}/.
 type PluginGitHandler struct {
 	vaultRoot string
 	locker    vaultsync.VaultLocker
@@ -31,18 +32,84 @@ func NewPluginGitHandler(vaultRoot string, locker vaultsync.VaultLocker, rebuild
 func (h *PluginGitHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/vault/plugins/git/head", h.HandleHead)
 	mux.HandleFunc("GET /api/vault/plugins/git/status", h.HandleStatus)
+	mux.HandleFunc("GET /api/vault/plugins/git/status-all", h.HandleStatusAll)
 	mux.HandleFunc("GET /api/vault/plugins/git/archive", h.HandleArchive)
 	mux.HandleFunc("POST /api/vault/plugins/git/push", h.HandlePush)
 	mux.HandleFunc("GET /api/vault/plugins/git/log", h.HandleLog)
 }
 
+// pluginsDir returns the parent directory containing all plugins.
 func (h *PluginGitHandler) pluginsDir(userID string) string {
 	return filepath.Join(h.vaultRoot, userID, "plugins")
 }
 
-// ensureRepo initializes a Git repo in plugins/ if it doesn't exist (idempotent).
-func (h *PluginGitHandler) ensureRepo(userID string) error {
-	dir := h.pluginsDir(userID)
+// pluginRepoDir returns the directory for a specific plugin (also the git repo root).
+func (h *PluginGitHandler) pluginRepoDir(userID, pluginDir string) string {
+	return filepath.Join(h.vaultRoot, userID, "plugins", pluginDir)
+}
+
+// migrateMonoRepo detects the old monorepo format (plugins/.git) and splits
+// into per-plugin repos. Idempotent — skips if already migrated.
+func (h *PluginGitHandler) migrateMonoRepo(userID string) {
+	pDir := h.pluginsDir(userID)
+	markerPath := filepath.Join(pDir, ".migrated")
+
+	if _, err := os.Stat(markerPath); err == nil {
+		return // already migrated
+	}
+
+	oldGitDir := filepath.Join(pDir, ".git")
+	if _, err := os.Stat(oldGitDir); err != nil {
+		return // no old monorepo, nothing to migrate
+	}
+
+	log.Printf("[PluginGit] migrating monorepo for %s", userID)
+
+	entries, err := os.ReadDir(pDir)
+	if err != nil {
+		log.Printf("[PluginGit] migration: cannot list plugins dir: %v", err)
+		return
+	}
+
+	for _, e := range entries {
+		if !e.IsDir() || e.Name() == ".git" {
+			continue
+		}
+		subDir := filepath.Join(pDir, e.Name())
+		subGit := filepath.Join(subDir, ".git")
+		if _, err := os.Stat(subGit); err == nil {
+			continue // already has its own repo
+		}
+
+		if err := gitExec(subDir, "init"); err != nil {
+			log.Printf("[PluginGit] migration: git init %s failed: %v", e.Name(), err)
+			continue
+		}
+		gitignore := "frontend/node_modules/\nbackend/node_modules/\nfrontend/bundle.js\nfrontend/bundle.css\nbackend/dist/\n.DS_Store\n"
+		os.WriteFile(filepath.Join(subDir, ".gitignore"), []byte(gitignore), 0644)
+		if err := gitExec(subDir, "add", "-A"); err != nil {
+			log.Printf("[PluginGit] migration: git add %s failed: %v", e.Name(), err)
+			continue
+		}
+		if err := gitExec(subDir, "commit", "--allow-empty", "-m", "migrate: init from monorepo"); err != nil {
+			log.Printf("[PluginGit] migration: git commit %s failed: %v", e.Name(), err)
+			continue
+		}
+		log.Printf("[PluginGit] migration: initialized repo for %s/%s", userID, e.Name())
+	}
+
+	os.RemoveAll(oldGitDir)
+	os.WriteFile(markerPath, []byte("migrated"), 0644)
+	// remove old root .gitignore if present
+	os.Remove(filepath.Join(pDir, ".gitignore"))
+	log.Printf("[PluginGit] migration complete for %s", userID)
+}
+
+// ensureRepo initializes a Git repo in plugins/{pluginDir}/ if it doesn't exist.
+func (h *PluginGitHandler) ensureRepo(userID, pluginDir string) error {
+	h.migrateMonoRepo(userID)
+
+	dir := h.pluginRepoDir(userID, pluginDir)
 	gitDir := filepath.Join(dir, ".git")
 	if _, err := os.Stat(gitDir); err == nil {
 		return nil
@@ -53,24 +120,24 @@ func (h *PluginGitHandler) ensureRepo(userID string) error {
 	if err := gitExec(dir, "init"); err != nil {
 		return fmt.Errorf("git init: %w", err)
 	}
-	gitignore := "*/frontend/node_modules/\n*/backend/node_modules/\n*/frontend/bundle.js\n*/frontend/bundle.css\n*/backend/dist/\n.DS_Store\n"
+	gitignore := "frontend/node_modules/\nbackend/node_modules/\nfrontend/bundle.js\nfrontend/bundle.css\nbackend/dist/\n.DS_Store\n"
 	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(gitignore), 0644); err != nil {
 		return err
 	}
 	if err := gitExec(dir, "add", "-A"); err != nil {
 		return err
 	}
-	if err := gitExec(dir, "commit", "--allow-empty", "-m", "init: plugins repository"); err != nil {
+	if err := gitExec(dir, "commit", "--allow-empty", "-m", "init: plugin repository"); err != nil {
 		return err
 	}
-	log.Printf("[PluginGit] initialized repo for %s", userID)
+	log.Printf("[PluginGit] initialized repo for %s/%s", userID, pluginDir)
 	return nil
 }
 
-// commit stages all changes and commits. Returns commit hash or empty string if nothing to commit.
-func (h *PluginGitHandler) commit(userID, message, author string) (string, error) {
-	dir := h.pluginsDir(userID)
-	if err := h.ensureRepo(userID); err != nil {
+// commit stages all changes and commits in a specific plugin repo.
+func (h *PluginGitHandler) commit(userID, pluginDir, message, author string) (string, error) {
+	dir := h.pluginRepoDir(userID, pluginDir)
+	if err := h.ensureRepo(userID, pluginDir); err != nil {
 		return "", err
 	}
 	if err := gitExec(dir, "add", "-A"); err != nil {
@@ -78,7 +145,7 @@ func (h *PluginGitHandler) commit(userID, message, author string) (string, error
 	}
 	status, _ := gitOutput(dir, "status", "--porcelain")
 	if strings.TrimSpace(status) == "" {
-		return "", nil // nothing to commit
+		return "", nil
 	}
 	authorArg := fmt.Sprintf("%s <noreply@cubelv.com>", author)
 	if err := gitExec(dir, "commit", "-m", message, "--author", authorArg); err != nil {
@@ -91,9 +158,9 @@ func (h *PluginGitHandler) commit(userID, message, author string) (string, error
 	return strings.TrimSpace(hash), nil
 }
 
-func (h *PluginGitHandler) headCommit(userID string) (string, error) {
-	dir := h.pluginsDir(userID)
-	if err := h.ensureRepo(userID); err != nil {
+func (h *PluginGitHandler) headCommit(userID, pluginDir string) (string, error) {
+	dir := h.pluginRepoDir(userID, pluginDir)
+	if err := h.ensureRepo(userID, pluginDir); err != nil {
 		return "", err
 	}
 	hash, err := gitOutput(dir, "rev-parse", "HEAD")
@@ -103,14 +170,59 @@ func (h *PluginGitHandler) headCommit(userID string) (string, error) {
 	return strings.TrimSpace(hash), nil
 }
 
+// Commit is the public method for other handlers (plugin delete, etc.)
+func (h *PluginGitHandler) Commit(userID, pluginDir, message, author string) (string, error) {
+	return h.commit(userID, pluginDir, message, author)
+}
+
+// listPluginDirs returns all subdirectory names under plugins/ that have a .git/.
+func (h *PluginGitHandler) listPluginDirs(userID string) []string {
+	pDir := h.pluginsDir(userID)
+	entries, err := os.ReadDir(pDir)
+	if err != nil {
+		return nil
+	}
+	var dirs []string
+	for _, e := range entries {
+		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(pDir, e.Name(), ".git")); err == nil {
+			dirs = append(dirs, e.Name())
+		}
+	}
+	return dirs
+}
+
+// requirePluginParam extracts and validates the "plugin" query param.
+func requirePluginParam(w http.ResponseWriter, r *http.Request) (string, bool) {
+	p := r.URL.Query().Get("plugin")
+	if p == "" {
+		chatWriteError(w, 400, "missing 'plugin' query parameter")
+		return "", false
+	}
+	p = filepath.Base(p)
+	if p == "." || p == ".." || strings.Contains(p, "/") {
+		chatWriteError(w, 400, "invalid plugin name")
+		return "", false
+	}
+	return p, true
+}
+
 // --- HTTP Handlers ---
 
+// HandleHead returns the HEAD commit hash of a specific plugin repo.
+// GET /api/vault/plugins/git/head?plugin={dir}
 func (h *PluginGitHandler) HandleHead(w http.ResponseWriter, r *http.Request) {
 	memberID, ok := memberIDFromHeader(w, r)
 	if !ok {
 		return
 	}
-	hash, err := h.headCommit(memberID)
+	pluginDir, ok := requirePluginParam(w, r)
+	if !ok {
+		return
+	}
+	hash, err := h.headCommit(memberID, pluginDir)
 	if err != nil {
 		chatWriteError(w, 500, err.Error())
 		return
@@ -118,15 +230,21 @@ func (h *PluginGitHandler) HandleHead(w http.ResponseWriter, r *http.Request) {
 	chatWriteJSON(w, 200, map[string]string{"commit": hash})
 }
 
+// HandleStatus returns changed files for a specific plugin repo.
+// GET /api/vault/plugins/git/status?plugin={dir}&since=...
 func (h *PluginGitHandler) HandleStatus(w http.ResponseWriter, r *http.Request) {
 	memberID, ok := memberIDFromHeader(w, r)
 	if !ok {
 		return
 	}
+	pluginDir, ok := requirePluginParam(w, r)
+	if !ok {
+		return
+	}
 	since := r.URL.Query().Get("since")
-	dir := h.pluginsDir(memberID)
+	dir := h.pluginRepoDir(memberID, pluginDir)
 
-	if err := h.ensureRepo(memberID); err != nil {
+	if err := h.ensureRepo(memberID, pluginDir); err != nil {
 		chatWriteError(w, 500, err.Error())
 		return
 	}
@@ -136,7 +254,6 @@ func (h *PluginGitHandler) HandleStatus(w http.ResponseWriter, r *http.Request) 
 
 	var files []map[string]string
 	if since == "" || since == "0" {
-		// 全量：列出所有 tracked files
 		output, _ := gitOutput(dir, "ls-files")
 		for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
 			if line != "" {
@@ -144,10 +261,8 @@ func (h *PluginGitHandler) HandleStatus(w http.ResponseWriter, r *http.Request) 
 			}
 		}
 	} else {
-		// 差量：since..HEAD
 		output, err := gitOutput(dir, "diff", "--name-status", since+"..HEAD")
 		if err != nil {
-			// since commit might not exist (first sync)
 			output, _ = gitOutput(dir, "ls-files")
 			for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
 				if line != "" {
@@ -166,7 +281,6 @@ func (h *PluginGitHandler) HandleStatus(w http.ResponseWriter, r *http.Request) 
 			}
 		}
 	}
-
 	if files == nil {
 		files = []map[string]string{}
 	}
@@ -177,20 +291,46 @@ func (h *PluginGitHandler) HandleStatus(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
+// HandleStatusAll returns the HEAD commit of every plugin repo at once.
+// GET /api/vault/plugins/git/status-all
+// Response: { "plugins": { "pomodoro": { "headCommit": "abc123" }, ... } }
+func (h *PluginGitHandler) HandleStatusAll(w http.ResponseWriter, r *http.Request) {
+	memberID, ok := memberIDFromHeader(w, r)
+	if !ok {
+		return
+	}
+
+	h.migrateMonoRepo(memberID)
+
+	result := map[string]interface{}{}
+	for _, d := range h.listPluginDirs(memberID) {
+		dir := h.pluginRepoDir(memberID, d)
+		head, _ := gitOutput(dir, "rev-parse", "HEAD")
+		result[d] = map[string]string{"headCommit": strings.TrimSpace(head)}
+	}
+
+	chatWriteJSON(w, 200, map[string]interface{}{"plugins": result})
+}
+
+// HandleArchive returns a tar.gz archive of a specific plugin's files.
+// GET /api/vault/plugins/git/archive?plugin={dir}&since=...
 func (h *PluginGitHandler) HandleArchive(w http.ResponseWriter, r *http.Request) {
 	memberID, ok := memberIDFromHeader(w, r)
 	if !ok {
 		return
 	}
+	pluginDir, ok := requirePluginParam(w, r)
+	if !ok {
+		return
+	}
 	since := r.URL.Query().Get("since")
-	dir := h.pluginsDir(memberID)
+	dir := h.pluginRepoDir(memberID, pluginDir)
 
-	if err := h.ensureRepo(memberID); err != nil {
+	if err := h.ensureRepo(memberID, pluginDir); err != nil {
 		chatWriteError(w, 500, err.Error())
 		return
 	}
 
-	// Get list of files to archive
 	var filePaths []string
 	if since == "" || since == "0" {
 		output, _ := gitOutput(dir, "ls-files")
@@ -208,7 +348,6 @@ func (h *PluginGitHandler) HandleArchive(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	// Create tar.gz
 	var buf bytes.Buffer
 	gw := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(gw)
@@ -217,7 +356,7 @@ func (h *PluginGitHandler) HandleArchive(w http.ResponseWriter, r *http.Request)
 		fullPath := filepath.Join(dir, fp)
 		info, err := os.Stat(fullPath)
 		if err != nil {
-			continue // file might have been deleted
+			continue
 		}
 		header, _ := tar.FileInfoHeader(info, "")
 		header.Name = fp
@@ -234,10 +373,13 @@ func (h *PluginGitHandler) HandleArchive(w http.ResponseWriter, r *http.Request)
 	gw.Close()
 
 	w.Header().Set("Content-Type", "application/gzip")
-	w.Header().Set("Content-Disposition", "attachment; filename=plugins.tar.gz")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s.tar.gz", pluginDir))
 	w.Write(buf.Bytes())
 }
 
+// HandlePush receives file changes for a specific plugin and commits them.
+// POST /api/vault/plugins/git/push
+// Body: { "pluginDir": "pomodoro", "baseCommit": "...", "message": "...", "files": [...] }
 func (h *PluginGitHandler) HandlePush(w http.ResponseWriter, r *http.Request) {
 	memberID, ok := memberIDFromHeader(w, r)
 	if !ok {
@@ -250,12 +392,13 @@ func (h *PluginGitHandler) HandlePush(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
+		PluginDir  string `json:"pluginDir"`
 		BaseCommit string `json:"baseCommit"`
 		Message    string `json:"message"`
 		Files      []struct {
 			Path    string `json:"path"`
 			Content string `json:"content"`
-			Action  string `json:"action"` // add, modify, delete
+			Action  string `json:"action"`
 		} `json:"files"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -263,17 +406,21 @@ func (h *PluginGitHandler) HandlePush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	dir := h.pluginsDir(memberID)
-	if err := h.ensureRepo(memberID); err != nil {
+	pluginDir := filepath.Base(req.PluginDir)
+	if pluginDir == "" || pluginDir == "." || pluginDir == ".." {
+		chatWriteError(w, 400, "pluginDir is required")
+		return
+	}
+
+	dir := h.pluginRepoDir(memberID, pluginDir)
+	if err := h.ensureRepo(memberID, pluginDir); err != nil {
 		chatWriteError(w, 500, err.Error())
 		return
 	}
 
-	// Check if baseCommit is ancestor of HEAD
 	head, _ := gitOutput(dir, "rev-parse", "HEAD")
 	head = strings.TrimSpace(head)
 	if req.BaseCommit != "" && req.BaseCommit != head {
-		// Check ancestry
 		err := gitExec(dir, "merge-base", "--is-ancestor", req.BaseCommit, "HEAD")
 		if err != nil {
 			chatWriteJSON(w, 409, map[string]interface{}{
@@ -284,7 +431,6 @@ func (h *PluginGitHandler) HandlePush(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Apply file changes
 	for _, f := range req.Files {
 		fullPath := filepath.Join(dir, f.Path)
 		if f.Action == "delete" {
@@ -299,40 +445,36 @@ func (h *PluginGitHandler) HandlePush(w http.ResponseWriter, r *http.Request) {
 	if msg == "" {
 		msg = "client push"
 	}
-	commitHash, err := h.commit(memberID, msg, "client-sync")
+	commitHash, err := h.commit(memberID, pluginDir, msg, "client-sync")
 	if err != nil {
 		chatWriteError(w, 500, err.Error())
 		return
 	}
 
-	// Trigger rebuild for changed plugins
 	if h.rebuilder != nil {
-		changedDirs := map[string]bool{}
-		for _, f := range req.Files {
-			parts := strings.SplitN(f.Path, "/", 2)
-			if len(parts) >= 1 {
-				changedDirs[parts[0]] = true
+		go func() {
+			if _, err := h.rebuilder.Rebuild(r.Context(), RebuildReq{MemberID: memberID, PluginDir: pluginDir}); err != nil {
+				log.Printf("[PluginGit] rebuild failed: %s/%s: %v", memberID, pluginDir, err)
 			}
-		}
-		for pluginDir := range changedDirs {
-			go func(pd string) {
-				if _, err := h.rebuilder.Rebuild(r.Context(), RebuildReq{MemberID: memberID, PluginDir: pd}); err != nil {
-					log.Printf("[PluginGit] rebuild failed: %s/%s: %v", memberID, pd, err)
-				}
-			}(pluginDir)
-		}
+		}()
 	}
 
 	chatWriteJSON(w, 200, map[string]string{"commitHash": commitHash})
 }
 
+// HandleLog returns recent commits for a specific plugin repo.
+// GET /api/vault/plugins/git/log?plugin={dir}&limit=20
 func (h *PluginGitHandler) HandleLog(w http.ResponseWriter, r *http.Request) {
 	memberID, ok := memberIDFromHeader(w, r)
 	if !ok {
 		return
 	}
-	dir := h.pluginsDir(memberID)
-	if err := h.ensureRepo(memberID); err != nil {
+	pluginDir, ok := requirePluginParam(w, r)
+	if !ok {
+		return
+	}
+	dir := h.pluginRepoDir(memberID, pluginDir)
+	if err := h.ensureRepo(memberID, pluginDir); err != nil {
 		chatWriteError(w, 500, err.Error())
 		return
 	}
@@ -367,11 +509,6 @@ func (h *PluginGitHandler) HandleLog(w http.ResponseWriter, r *http.Request) {
 		entries = []map[string]string{}
 	}
 	chatWriteJSON(w, 200, entries)
-}
-
-// Commit is a public method for other handlers to use (plugin delete, etc.)
-func (h *PluginGitHandler) Commit(userID, message, author string) (string, error) {
-	return h.commit(userID, message, author)
 }
 
 // --- Git helpers ---
