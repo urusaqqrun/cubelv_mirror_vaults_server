@@ -139,6 +139,8 @@ func (s *PgStore) UpsertItem(ctx context.Context, userID string, doc map[string]
 		}
 	}
 
+	delete(fields, "linkedFrom")
+
 	fieldsJSON, err := json.Marshal(fields)
 	if err != nil {
 		return fmt.Errorf("marshal fields: %w", err)
@@ -149,6 +151,18 @@ func (s *PgStore) UpsertItem(ctx context.Context, userID string, doc map[string]
 		return fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback()
+
+	var oldContent string
+	var oldFieldsJSON string
+	err = tx.QueryRowContext(ctx,
+		`SELECT COALESCE(fields, '{}') FROM base_items WHERE id = $1`, id,
+	).Scan(&oldFieldsJSON)
+	if err == nil {
+		var oldFields map[string]interface{}
+		if json.Unmarshal([]byte(oldFieldsJSON), &oldFields) == nil {
+			oldContent, _ = oldFields["content"].(string)
+		}
+	}
 
 	_, err = tx.ExecContext(ctx,
 		`INSERT INTO base_items (id, item_type, name, fields, version, created_at, updated_at)
@@ -182,6 +196,11 @@ func (s *PgStore) UpsertItem(ctx context.Context, userID string, doc map[string]
 	)
 	if err != nil {
 		return fmt.Errorf("insert sync_changes: %w", err)
+	}
+
+	newContent, _ := fields["content"].(string)
+	if oldContent != newContent {
+		s.ProcessBacklinksOnContentChange(ctx, tx, id, name, itemType, oldContent, newContent, userID)
 	}
 
 	return tx.Commit()
