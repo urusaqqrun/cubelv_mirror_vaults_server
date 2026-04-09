@@ -35,7 +35,7 @@ type ExportItemResult struct {
 }
 
 // ExportItem 通用匯出：每個 item 都對應一個 .json 檔。
-// 檔名規則：有 name → {sanitizeName(name)}_{id}.json；無 name → {id}.json
+// 檔名規則：同層級無同名 → {sanitizeName(name)}.json；有同名 → {sanitizeName(name)}_{id}.json
 func (e *Exporter) ExportItem(userId string, item *model.Item) (ExportItemResult, error) {
 	mirrorData := ItemToMirrorData(item)
 	parentDirPath := e.ResolveParentDir(userId, item.GetParentID(), item.Type)
@@ -43,10 +43,15 @@ func (e *Exporter) ExportItem(userId string, item *model.Item) (ExportItemResult
 		return ExportItemResult{}, fmt.Errorf("mkdir parent: %w", err)
 	}
 
-	fileName := BuildFileNameWithID(mirrorData.Name, mirrorData.ID)
+	needsID := e.resolver.NeedsIDSuffix(mirrorData.ID)
+	fileName := BuildFileName(mirrorData.Name, mirrorData.ID, needsID)
 	fullPath := filepath.Join(parentDirPath, fileName)
 
 	e.cleanupOldItemPath(userId, mirrorData.ID, fullPath)
+
+	if needsID {
+		e.ensureSiblingsHaveIDSuffix(userId, mirrorData.ID, parentDirPath)
+	}
 
 	jsonBytes, err := ItemToMirrorJSON(mirrorData)
 	if err != nil {
@@ -62,6 +67,44 @@ func (e *Exporter) ExportItem(userId string, item *model.Item) (ExportItemResult
 		Path:     fullPath,
 		IsFolder: model.IsFolder(item.Type),
 	}, nil
+}
+
+// ensureSiblingsHaveIDSuffix 確保同名 sibling 的檔案也帶有 _id 後綴。
+// 場景：新增 item 造成同名衝突時，已存在的 sibling 原本是 name.json，需改名為 name_id.json。
+func (e *Exporter) ensureSiblingsHaveIDSuffix(userID, itemID, parentDirPath string) {
+	siblings := e.resolver.GetConflictingSiblings(itemID)
+	for _, sibID := range siblings {
+		e.ensureDocPathIndex(userID)
+		oldPath := e.getIndexedPath(userID, sibID)
+		if oldPath == "" {
+			continue
+		}
+		data, err := e.fs.ReadFile(oldPath)
+		if err != nil {
+			continue
+		}
+		sibItem, err := MirrorJSONToItem(data)
+		if err != nil {
+			continue
+		}
+		expectedName := BuildFileName(sibItem.Name, sibItem.ID, true)
+		expectedPath := filepath.Join(parentDirPath, expectedName)
+		if oldPath == expectedPath {
+			continue
+		}
+		if !e.fs.Exists(oldPath) {
+			continue
+		}
+		if err := e.fs.Rename(oldPath, expectedPath); err != nil {
+			continue
+		}
+		e.setIndexedPath(userID, sibID, expectedPath)
+		oldDir := strings.TrimSuffix(oldPath, ".json")
+		newDir := strings.TrimSuffix(expectedPath, ".json")
+		if oldDir != oldPath && e.fs.Exists(oldDir) {
+			_ = e.fs.Rename(oldDir, newDir)
+		}
+	}
 }
 
 // ResolveParentDir returns the directory path where an item's .json should be written.

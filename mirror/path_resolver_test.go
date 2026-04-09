@@ -14,8 +14,8 @@ func TestResolvePath_TopLevel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != "NOTE/工作_f1" {
-		t.Errorf("got %q, want %q", got, "NOTE/工作_f1")
+	if got != "NOTE/工作" {
+		t.Errorf("got %q, want %q", got, "NOTE/工作")
 	}
 }
 
@@ -28,8 +28,8 @@ func TestResolvePath_Nested(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != "NOTE/工作_f1/會議紀錄_f2" {
-		t.Errorf("got %q, want %q", got, "NOTE/工作_f1/會議紀錄_f2")
+	if got != "NOTE/工作/會議紀錄" {
+		t.Errorf("got %q, want %q", got, "NOTE/工作/會議紀錄")
 	}
 }
 
@@ -43,8 +43,8 @@ func TestResolvePath_DeeplyNested(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != "NOTE/工作_f1/專案_f2/前端_f3" {
-		t.Errorf("got %q, want %q", got, "NOTE/工作_f1/專案_f2/前端_f3")
+	if got != "NOTE/工作/專案/前端" {
+		t.Errorf("got %q, want %q", got, "NOTE/工作/專案/前端")
 	}
 }
 
@@ -54,11 +54,11 @@ func TestResolvePath_DifferentTypes(t *testing.T) {
 		node     TreeNode
 		expected string
 	}{
-		{"CARD root", TreeNode{ID: "c1", Name: "讀書卡片", ItemType: "CARD_FOLDER", ParentID: nil}, "CARD/讀書卡片_c1"},
-		{"CHART root", TreeNode{ID: "ch1", Name: "月報圖表", ItemType: "CHART_FOLDER", ParentID: nil}, "CHART/月報圖表_ch1"},
-		{"TODO root", TreeNode{ID: "t1", Name: "待辦清單", ItemType: "TODO", ParentID: nil}, "TODO/待辦清單_t1"},
-		{"NOTE root", TreeNode{ID: "n1", Name: "筆記", ItemType: "NOTE", ParentID: nil}, "NOTE/筆記_n1"},
-		{"empty type defaults to NOTE", TreeNode{ID: "e1", Name: "雜記", ItemType: "", ParentID: nil}, "NOTE/雜記_e1"},
+		{"CARD root", TreeNode{ID: "c1", Name: "讀書卡片", ItemType: "CARD_FOLDER", ParentID: nil}, "CARD/讀書卡片"},
+		{"CHART root", TreeNode{ID: "ch1", Name: "月報圖表", ItemType: "CHART_FOLDER", ParentID: nil}, "CHART/月報圖表"},
+		{"TODO root", TreeNode{ID: "t1", Name: "待辦清單", ItemType: "TODO", ParentID: nil}, "TODO/待辦清單"},
+		{"NOTE root", TreeNode{ID: "n1", Name: "筆記", ItemType: "NOTE", ParentID: nil}, "NOTE/筆記"},
+		{"empty type defaults to NOTE", TreeNode{ID: "e1", Name: "雜記", ItemType: "", ParentID: nil}, "NOTE/雜記"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -133,8 +133,8 @@ func TestAddNode_UpdatesTree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != "NOTE/工作_f1/新專案_f2" {
-		t.Errorf("got %q, want %q", got, "NOTE/工作_f1/新專案_f2")
+	if got != "NOTE/工作/新專案" {
+		t.Errorf("got %q, want %q", got, "NOTE/工作/新專案")
 	}
 }
 
@@ -162,8 +162,8 @@ func TestUpdateNode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != "NOTE/工作_f1/新名_f2" {
-		t.Errorf("got %q, want %q", got, "NOTE/工作_f1/新名_f2")
+	if got != "NOTE/工作/新名" {
+		t.Errorf("got %q, want %q", got, "NOTE/工作/新名")
 	}
 }
 
@@ -175,8 +175,8 @@ func TestResolvePath_SpecialCharactersInName(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != "NOTE/工作_專案_f1" {
-		t.Errorf("got %q, want %q", got, "NOTE/工作_專案_f1")
+	if got != "NOTE/工作_專案" {
+		t.Errorf("got %q, want %q", got, "NOTE/工作_專案")
 	}
 }
 
@@ -207,7 +207,105 @@ func TestResolvePath_CacheInvalidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != "NOTE/生活_f1/子目錄_f2" {
-		t.Errorf("cache not invalidated: got %q, want %q", got, "NOTE/生活_f1/子目錄_f2")
+	if got != "NOTE/生活/子目錄" {
+		t.Errorf("cache not invalidated: got %q, want %q", got, "NOTE/生活/子目錄")
+	}
+}
+
+// --- 同名衝突測試 ---
+
+func TestResolvePath_SameNameSiblings_UseIDSuffix(t *testing.T) {
+	r := NewPathResolver([]TreeNode{
+		{ID: "f1", Name: "工作", ItemType: "NOTE_FOLDER", ParentID: nil},
+		{ID: "a1", Name: "inbox", ItemType: "NOTE", ParentID: strPtr("f1")},
+		{ID: "a2", Name: "inbox", ItemType: "NOTE", ParentID: strPtr("f1")},
+	})
+	gotA, err := r.ResolvePath("a1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotB, err := r.ResolvePath("a2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotA != "NOTE/工作/inbox_a1" {
+		t.Errorf("a1: got %q, want %q", gotA, "NOTE/工作/inbox_a1")
+	}
+	if gotB != "NOTE/工作/inbox_a2" {
+		t.Errorf("a2: got %q, want %q", gotB, "NOTE/工作/inbox_a2")
+	}
+}
+
+func TestNeedsIDSuffix_NoConflict(t *testing.T) {
+	r := NewPathResolver([]TreeNode{
+		{ID: "f1", Name: "工作", ItemType: "NOTE_FOLDER", ParentID: nil},
+		{ID: "n1", Name: "筆記A", ItemType: "NOTE", ParentID: strPtr("f1")},
+		{ID: "n2", Name: "筆記B", ItemType: "NOTE", ParentID: strPtr("f1")},
+	})
+	if r.NeedsIDSuffix("n1") {
+		t.Error("n1 should not need ID suffix (unique name)")
+	}
+}
+
+func TestNeedsIDSuffix_WithConflict(t *testing.T) {
+	r := NewPathResolver([]TreeNode{
+		{ID: "f1", Name: "工作", ItemType: "NOTE_FOLDER", ParentID: nil},
+		{ID: "n1", Name: "inbox", ItemType: "NOTE", ParentID: strPtr("f1")},
+		{ID: "n2", Name: "inbox", ItemType: "NOTE", ParentID: strPtr("f1")},
+	})
+	if !r.NeedsIDSuffix("n1") {
+		t.Error("n1 should need ID suffix (duplicate name)")
+	}
+	if !r.NeedsIDSuffix("n2") {
+		t.Error("n2 should need ID suffix (duplicate name)")
+	}
+}
+
+func TestNeedsIDSuffix_DifferentParent_NoConflict(t *testing.T) {
+	r := NewPathResolver([]TreeNode{
+		{ID: "f1", Name: "工作", ItemType: "NOTE_FOLDER", ParentID: nil},
+		{ID: "f2", Name: "生活", ItemType: "NOTE_FOLDER", ParentID: nil},
+		{ID: "n1", Name: "inbox", ItemType: "NOTE", ParentID: strPtr("f1")},
+		{ID: "n2", Name: "inbox", ItemType: "NOTE", ParentID: strPtr("f2")},
+	})
+	if r.NeedsIDSuffix("n1") {
+		t.Error("n1 should not need ID suffix (different parents)")
+	}
+}
+
+func TestNeedsIDSuffix_EmptyName_NeverConflicts(t *testing.T) {
+	r := NewPathResolver([]TreeNode{
+		{ID: "f1", Name: "工作", ItemType: "NOTE_FOLDER", ParentID: nil},
+		{ID: "n1", Name: "", ItemType: "NOTE", ParentID: strPtr("f1")},
+		{ID: "n2", Name: "", ItemType: "NOTE", ParentID: strPtr("f1")},
+	})
+	if r.NeedsIDSuffix("n1") {
+		t.Error("empty name items use bare ID, never conflict")
+	}
+}
+
+func TestGetConflictingSiblings(t *testing.T) {
+	r := NewPathResolver([]TreeNode{
+		{ID: "f1", Name: "工作", ItemType: "NOTE_FOLDER", ParentID: nil},
+		{ID: "n1", Name: "inbox", ItemType: "NOTE", ParentID: strPtr("f1")},
+		{ID: "n2", Name: "inbox", ItemType: "NOTE", ParentID: strPtr("f1")},
+		{ID: "n3", Name: "other", ItemType: "NOTE", ParentID: strPtr("f1")},
+	})
+	siblings := r.GetConflictingSiblings("n1")
+	if len(siblings) != 1 || siblings[0] != "n2" {
+		t.Errorf("expected [n2], got %v", siblings)
+	}
+}
+
+func TestSameParentDir_RootLevel_FolderVsNonFolder(t *testing.T) {
+	r := NewPathResolver([]TreeNode{
+		{ID: "f1", Name: "inbox", ItemType: "NOTE_FOLDER", ParentID: nil},
+		{ID: "n1", Name: "inbox", ItemType: "NOTE", ParentID: nil},
+	})
+	if r.NeedsIDSuffix("f1") {
+		t.Error("FOLDER and non-FOLDER at root are in different dirs, should not conflict")
+	}
+	if r.NeedsIDSuffix("n1") {
+		t.Error("FOLDER and non-FOLDER at root are in different dirs, should not conflict")
 	}
 }
