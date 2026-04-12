@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -20,15 +21,21 @@ type WsBroadcaster interface {
 	BroadcastToMember(memberID string, msg map[string]interface{})
 }
 
+// PluginRebuilder 能觸發插件重新編譯
+type PluginRebuilder interface {
+	Rebuild(ctx context.Context, req RebuildReq) (*RebuildResp, error)
+}
+
 // VaultSyncHandler 提供 vault 檔案級同步 API
 type VaultSyncHandler struct {
 	vaultFS     mirror.VaultFS
 	vaultRoot   string
 	broadcaster WsBroadcaster
+	rebuilder   PluginRebuilder
 }
 
-func NewVaultSyncHandler(vaultFS mirror.VaultFS, vaultRoot string, broadcaster WsBroadcaster) *VaultSyncHandler {
-	return &VaultSyncHandler{vaultFS: vaultFS, vaultRoot: vaultRoot, broadcaster: broadcaster}
+func NewVaultSyncHandler(vaultFS mirror.VaultFS, vaultRoot string, broadcaster WsBroadcaster, rebuilder PluginRebuilder) *VaultSyncHandler {
+	return &VaultSyncHandler{vaultFS: vaultFS, vaultRoot: vaultRoot, broadcaster: broadcaster, rebuilder: rebuilder}
 }
 
 func (h *VaultSyncHandler) RegisterRoutes(mux *http.ServeMux) {
@@ -63,7 +70,7 @@ func (h *VaultSyncHandler) HandleSnapshot(w http.ResponseWriter, r *http.Request
 		if info.IsDir() {
 			name := info.Name()
 			// 排除不同步的目錄
-			if name == "node_modules" || name == ".sync" {
+			if name == "node_modules" || name == ".sync" || name == ".git" {
 				return filepath.SkipDir
 			}
 			return nil
@@ -76,8 +83,8 @@ func (h *VaultSyncHandler) HandleSnapshot(w http.ResponseWriter, r *http.Request
 		}
 		relPath = filepath.ToSlash(relPath)
 
-		// 排除 bundle.js
-		if strings.HasSuffix(relPath, "/bundle.js") && strings.HasPrefix(relPath, "plugins/") {
+		// plugins/ 由 Git 管理，不在 snapshot 中
+		if strings.HasPrefix(relPath, "plugins/") {
 			return nil
 		}
 
@@ -169,6 +176,12 @@ func (h *VaultSyncHandler) HandleFileUpload(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// plugins/ 走 Git API，不走 vault file API
+	if strings.HasPrefix(filePath, "plugins/") {
+		http.Error(w, "plugins/ files must use /api/vault/plugins/git/push", 400)
+		return
+	}
+
 	// 讀取 body
 	content, err := io.ReadAll(io.LimitReader(r.Body, 10*1024*1024)) // max 10MB
 	if err != nil {
@@ -238,6 +251,12 @@ func (h *VaultSyncHandler) HandleFileDelete(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// plugins/ 走 Git API
+	if strings.HasPrefix(filePath, "plugins/") {
+		http.Error(w, "plugins/ files must use /api/vault/plugins/git/push", 400)
+		return
+	}
+
 	fullPath := filepath.Join(memberID, filePath)
 
 	if !h.vaultFS.Exists(fullPath) {
@@ -267,3 +286,5 @@ func (h *VaultSyncHandler) HandleFileDelete(w http.ResponseWriter, r *http.Reque
 		"path":   filePath,
 	})
 }
+
+// isPluginSource and extractPluginDir removed — plugins now use Git API

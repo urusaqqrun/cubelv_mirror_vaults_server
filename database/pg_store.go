@@ -12,7 +12,6 @@ import (
 	_ "github.com/lib/pq"
 	"github.com/redis/go-redis/v9"
 
-	"github.com/urusaqqrun/vault-mirror-service/executor"
 	"github.com/urusaqqrun/vault-mirror-service/model"
 )
 
@@ -60,10 +59,10 @@ func (s *PgStore) Close() error {
 
 func (s *PgStore) GetItem(ctx context.Context, userID, itemID string) (*model.Item, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT bi.id, bi.item_type, bi.name, bi.fields, bi.version, bi.created_at, bi.updated_at
+		`SELECT bi.id, bi.item_type, bi.name, bi.fields, bi.version, bi.created_at, bi.updated_at, bi.backlinks
 		 FROM base_items bi
 		 JOIN item_permissions ip ON ip.item_id = bi.id AND ip.permission = 'owner'
-		 WHERE bi.id = $1 AND ip.user_id = $2 AND bi.deleted_at IS NULL`,
+		 WHERE bi.id = $1 AND ip.user_id = $2`,
 		itemID, userID,
 	)
 	return s.scanItem(row)
@@ -71,10 +70,10 @@ func (s *PgStore) GetItem(ctx context.Context, userID, itemID string) (*model.It
 
 func (s *PgStore) ListAllItems(ctx context.Context, userID string) ([]*model.Item, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT bi.id, bi.item_type, bi.name, bi.fields, bi.version, bi.created_at, bi.updated_at
+		`SELECT bi.id, bi.item_type, bi.name, bi.fields, bi.version, bi.created_at, bi.updated_at, bi.backlinks
 		 FROM base_items bi
 		 JOIN item_permissions ip ON ip.item_id = bi.id AND ip.permission = 'owner'
-		 WHERE ip.user_id = $1 AND bi.deleted_at IS NULL`,
+		 WHERE ip.user_id = $1`,
 		userID,
 	)
 	if err != nil {
@@ -89,7 +88,7 @@ func (s *PgStore) ListAllItems(ctx context.Context, userID string) ([]*model.Ite
 // 所有 Upsert 統一寫入 base_items + sync_changes
 // ---------------------------------------------------------------------------
 
-func (s *PgStore) UpsertItem(ctx context.Context, userID string, doc executor.Doc) error {
+func (s *PgStore) UpsertItem(ctx context.Context, userID string, doc map[string]interface{}) error {
 	id, _ := doc["_id"].(string)
 	if id == "" {
 		return fmt.Errorf("missing _id in doc")
@@ -140,6 +139,8 @@ func (s *PgStore) UpsertItem(ctx context.Context, userID string, doc executor.Do
 		}
 	}
 
+	delete(fields, "backlinks")
+
 	fieldsJSON, err := json.Marshal(fields)
 	if err != nil {
 		return fmt.Errorf("marshal fields: %w", err)
@@ -150,6 +151,20 @@ func (s *PgStore) UpsertItem(ctx context.Context, userID string, doc executor.Do
 		return fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback()
+
+	var oldContent string
+	var oldSubjectID string
+	var oldFieldsJSON string
+	err = tx.QueryRowContext(ctx,
+		`SELECT COALESCE(fields, '{}') FROM base_items WHERE id = $1`, id,
+	).Scan(&oldFieldsJSON)
+	if err == nil {
+		var oldFields map[string]interface{}
+		if json.Unmarshal([]byte(oldFieldsJSON), &oldFields) == nil {
+			oldContent, _ = oldFields["content"].(string)
+			oldSubjectID, _ = oldFields["subjectID"].(string)
+		}
+	}
 
 	_, err = tx.ExecContext(ctx,
 		`INSERT INTO base_items (id, item_type, name, fields, version, created_at, updated_at)
@@ -185,6 +200,14 @@ func (s *PgStore) UpsertItem(ctx context.Context, userID string, doc executor.Do
 		return fmt.Errorf("insert sync_changes: %w", err)
 	}
 
+	newContent, _ := fields["content"].(string)
+	if oldContent != newContent {
+		s.ProcessBacklinksOnContentChange(ctx, tx, id, name, itemType, oldContent, newContent, userID)
+	}
+
+	newSubjectID, _ := fields["subjectID"].(string)
+	s.ProcessBacklinksOnSubjectChange(ctx, tx, id, oldSubjectID, newSubjectID, userID)
+
 	return tx.Commit()
 }
 
@@ -197,26 +220,48 @@ func (s *PgStore) DeleteItemDoc(ctx context.Context, userID, docID string, versi
 	}
 	defer tx.Rollback()
 
-	result, err := tx.ExecContext(ctx,
-		`UPDATE base_items SET deleted_at = $1, version = $2, updated_at = $1
-		 WHERE id = $3 AND deleted_at IS NULL
-		 AND EXISTS (SELECT 1 FROM item_permissions WHERE item_id = $3 AND user_id = $4 AND permission = 'owner')`,
-		now, version, docID, userID,
-	)
+	var exists bool
+	err = tx.QueryRowContext(ctx,
+		`SELECT EXISTS (SELECT 1 FROM base_items WHERE id = $1
+		 AND EXISTS (SELECT 1 FROM item_permissions WHERE item_id = $1 AND user_id = $2 AND permission = 'owner'))`,
+		docID, userID,
+	).Scan(&exists)
 	if err != nil {
-		return fmt.Errorf("soft delete: %w", err)
+		return fmt.Errorf("check existence: %w", err)
+	}
+	if !exists {
+		return nil
 	}
 
-	affected, _ := result.RowsAffected()
-	if affected > 0 {
-		_, err = tx.ExecContext(ctx,
-			`INSERT INTO sync_changes (item_id, item_version, change_type, actor_id, details, created_at)
-			 VALUES ($1, $2, 'deleted', $3, 'mirror-service writeback', $4)`,
-			docID, version, userID, now,
-		)
-		if err != nil {
-			return fmt.Errorf("insert sync_changes for delete: %w", err)
+	// 刪除前清除 backlinks：subjectID → child backlink、content → mention backlinks
+	var delFieldsJSON string
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(fields, '{}') FROM base_items WHERE id = $1`, docID).Scan(&delFieldsJSON); err == nil {
+		var delFields map[string]interface{}
+		if json.Unmarshal([]byte(delFieldsJSON), &delFields) == nil {
+			if subjectID, ok := delFields["subjectID"].(string); ok && subjectID != "" {
+				s.removeBacklink(ctx, tx, subjectID, docID, "child", userID)
+			}
+			if content, ok := delFields["content"].(string); ok && content != "" {
+				s.ProcessBacklinksOnContentChange(ctx, tx, docID, "", "", content, "", userID)
+			}
 		}
+	}
+
+	_, err = tx.ExecContext(ctx,
+		`INSERT INTO sync_changes (item_id, item_version, change_type, actor_id, details, created_at)
+		 VALUES ($1, $2, 'deleted', $3, 'mirror-service writeback', $4)`,
+		docID, version, userID, now,
+	)
+	if err != nil {
+		return fmt.Errorf("insert sync_changes for delete: %w", err)
+	}
+
+	_, err = tx.ExecContext(ctx,
+		`DELETE FROM base_items WHERE id = $1`,
+		docID,
+	)
+	if err != nil {
+		return fmt.Errorf("hard delete: %w", err)
 	}
 
 	return tx.Commit()
@@ -379,10 +424,10 @@ func (s *PgStore) GetLatestSeq(ctx context.Context, userID string) (int, error) 
 // ---------------------------------------------------------------------------
 
 func (s *PgStore) scanItem(row *sql.Row) (*model.Item, error) {
-	var id, itemType, name, fieldsJSON string
+	var id, itemType, name, fieldsJSON, backlinksJSON string
 	var version int
 	var createdAt, updatedAt int64
-	if err := row.Scan(&id, &itemType, &name, &fieldsJSON, &version, &createdAt, &updatedAt); err != nil {
+	if err := row.Scan(&id, &itemType, &name, &fieldsJSON, &version, &createdAt, &updatedAt, &backlinksJSON); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
@@ -397,6 +442,11 @@ func (s *PgStore) scanItem(row *sql.Row) (*model.Item, error) {
 	fields["createdAt"] = fmt.Sprintf("%d", createdAt)
 	fields["updatedAt"] = fmt.Sprintf("%d", updatedAt)
 
+	var backlinks []interface{}
+	if err := json.Unmarshal([]byte(backlinksJSON), &backlinks); err == nil && len(backlinks) > 0 {
+		fields["backlinks"] = backlinks
+	}
+
 	return &model.Item{
 		ID:     id,
 		Name:   name,
@@ -408,10 +458,10 @@ func (s *PgStore) scanItem(row *sql.Row) (*model.Item, error) {
 func (s *PgStore) scanItems(rows *sql.Rows) ([]*model.Item, error) {
 	var out []*model.Item
 	for rows.Next() {
-		var id, itemType, name, fieldsJSON string
+		var id, itemType, name, fieldsJSON, backlinksJSON string
 		var version int
 		var createdAt, updatedAt int64
-		if err := rows.Scan(&id, &itemType, &name, &fieldsJSON, &version, &createdAt, &updatedAt); err != nil {
+		if err := rows.Scan(&id, &itemType, &name, &fieldsJSON, &version, &createdAt, &updatedAt, &backlinksJSON); err != nil {
 			log.Printf("[scanItems] scan error: %v", err)
 			continue
 		}
@@ -422,6 +472,11 @@ func (s *PgStore) scanItems(rows *sql.Rows) ([]*model.Item, error) {
 		fields["usn"] = version
 		fields["createdAt"] = fmt.Sprintf("%d", createdAt)
 		fields["updatedAt"] = fmt.Sprintf("%d", updatedAt)
+
+		var backlinks []interface{}
+		if err := json.Unmarshal([]byte(backlinksJSON), &backlinks); err == nil && len(backlinks) > 0 {
+			fields["backlinks"] = backlinks
+		}
 
 		out = append(out, &model.Item{
 			ID:     id,

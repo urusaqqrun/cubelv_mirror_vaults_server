@@ -8,13 +8,13 @@ import (
 )
 
 func newTestExporter() (*Exporter, *MemoryVaultFS) {
-	fs := NewMemoryVaultFS()
+	mfs := NewMemoryVaultFS()
 	resolver := NewPathResolver([]TreeNode{
 		{ID: "f1", Name: "工作", ItemType: "NOTE_FOLDER", ParentID: nil},
 		{ID: "n1", Name: "筆記A", ItemType: "NOTE", ParentID: strPtr("f1")},
 		{ID: "c1", Name: "美食清單", ItemType: "CARD_FOLDER", ParentID: nil},
 	})
-	return NewExporter(fs, resolver), fs
+	return NewExporter(mfs, resolver), mfs
 }
 
 func TestExportItem_FolderWritesSiblingJSON(t *testing.T) {
@@ -101,6 +101,7 @@ func TestExportItem_RenameMovesChildContainer(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	exp.resolver.UpdateNode(TreeNode{ID: "n1", Name: "筆記B", ItemType: "NOTE", ParentID: strPtr("f1")})
 	parent.Name = "筆記B"
 	if _, err := exp.ExportItem("user1", parent); err != nil {
 		t.Fatal(err)
@@ -159,12 +160,12 @@ func TestDeleteItem_RemovesJSONAndChildDir(t *testing.T) {
 }
 
 func newItemTestExporter() (*Exporter, *MemoryVaultFS) {
-	fs := NewMemoryVaultFS()
+	mfs := NewMemoryVaultFS()
 	resolver := NewPathResolver([]TreeNode{
 		{ID: "f1", Name: "工作", ItemType: "NOTE_FOLDER", ParentID: nil},
 		{ID: "c1", Name: "看板", ItemType: "CARD_FOLDER", ParentID: nil},
 	})
-	return NewExporter(fs, resolver), fs
+	return NewExporter(mfs, resolver), mfs
 }
 
 func TestExportItem_LeafWritesJSON(t *testing.T) {
@@ -221,12 +222,14 @@ func TestExportItem_FolderCreatesDir(t *testing.T) {
 	}
 }
 
-func TestExportItem_Collision_UsesIDSuffix(t *testing.T) {
-	fs := NewMemoryVaultFS()
+func TestExportItem_SameNameDifferentID_UsesIDSuffix(t *testing.T) {
+	mfs := NewMemoryVaultFS()
 	resolver := NewPathResolver([]TreeNode{
 		{ID: "f1", Name: "工作", ItemType: "NOTE_FOLDER", ParentID: nil},
+		{ID: "f-a", Name: "inbox", ItemType: "NOTE", ParentID: strPtr("f1")},
+		{ID: "f-b", Name: "inbox", ItemType: "NOTE", ParentID: strPtr("f1")},
 	})
-	exp := NewExporter(fs, resolver)
+	exp := NewExporter(mfs, resolver)
 
 	first := &model.Item{ID: "f-a", Name: "inbox", Type: "NOTE", Fields: map[string]interface{}{"parentID": "f1"}}
 	second := &model.Item{ID: "f-b", Name: "inbox", Type: "NOTE", Fields: map[string]interface{}{"parentID": "f1"}}
@@ -240,18 +243,37 @@ func TestExportItem_Collision_UsesIDSuffix(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if firstResult.Path != "user1/NOTE/工作/inbox.json" {
+	if firstResult.Path != "user1/NOTE/工作/inbox_f-a.json" {
 		t.Fatalf("unexpected first item path: %q", firstResult.Path)
 	}
-	if !strings.Contains(secondResult.Path, "inbox_") {
-		t.Fatalf("expected suffixed second item path, got %q", secondResult.Path)
+	if secondResult.Path != "user1/NOTE/工作/inbox_f-b.json" {
+		t.Fatalf("unexpected second item path: %q", secondResult.Path)
 	}
-	if !fs.Exists(firstResult.Path) || !fs.Exists(secondResult.Path) {
-		t.Fatal("both colliding items should exist")
+	if !mfs.Exists(firstResult.Path) || !mfs.Exists(secondResult.Path) {
+		t.Fatal("both items should exist with unique names")
 	}
 }
 
-func TestExportItem_EmptyName_UsesFallback(t *testing.T) {
+func TestExportItem_UniqueName_NoIDSuffix(t *testing.T) {
+	mfs := NewMemoryVaultFS()
+	resolver := NewPathResolver([]TreeNode{
+		{ID: "f1", Name: "工作", ItemType: "NOTE_FOLDER", ParentID: nil},
+		{ID: "n1", Name: "inbox", ItemType: "NOTE", ParentID: strPtr("f1")},
+		{ID: "n2", Name: "outbox", ItemType: "NOTE", ParentID: strPtr("f1")},
+	})
+	exp := NewExporter(mfs, resolver)
+
+	item := &model.Item{ID: "n1", Name: "inbox", Type: "NOTE", Fields: map[string]interface{}{"parentID": "f1"}}
+	result, err := exp.ExportItem("user1", item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Path != "user1/NOTE/工作/inbox.json" {
+		t.Errorf("unique name should not have ID suffix, got %q", result.Path)
+	}
+}
+
+func TestExportItem_EmptyName_UsesID(t *testing.T) {
 	exp, fs := newItemTestExporter()
 	item := &model.Item{
 		ID:   "abc12345",
@@ -261,43 +283,19 @@ func TestExportItem_EmptyName_UsesFallback(t *testing.T) {
 			"parentID": "f1",
 		},
 	}
-	_, err := exp.ExportItem("user1", item)
+	result, err := exp.ExportItem("user1", item)
 	if err != nil {
 		t.Fatal(err)
 	}
-	expectedName := VaultFallbackName("abc12345")
-	if !fs.Exists("user1/NOTE/工作/" + sanitizeName(expectedName) + ".json") {
-		t.Errorf("should use fallback name %q", expectedName)
+	if result.Path != "user1/NOTE/工作/abc12345.json" {
+		t.Errorf("empty name should use ID as filename, got %q", result.Path)
+	}
+	if !fs.Exists("user1/NOTE/工作/abc12345.json") {
+		t.Error("file should exist")
 	}
 }
 
-func TestExportItem_ResolveCollision_DifferentID(t *testing.T) {
-	exp, fs := newItemTestExporter()
-	item1 := &model.Item{
-		ID: "id_aaaabbbb", Name: "同名", Type: "NOTE",
-		Fields: map[string]interface{}{"parentID": "f1"},
-	}
-	item2 := &model.Item{
-		ID: "id_ccccdddd", Name: "同名", Type: "NOTE",
-		Fields: map[string]interface{}{"parentID": "f1"},
-	}
-	if _, err := exp.ExportItem("user1", item1); err != nil {
-		t.Fatal(err)
-	}
-	result, err := exp.ExportItem("user1", item2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// item2 的路徑應帶 id 後綴
-	if !strings.Contains(result.Path, "_ccccdddd") {
-		t.Errorf("collision should add id suffix, got path: %q", result.Path)
-	}
-	if !fs.Exists(result.Path) {
-		t.Error("collision-resolved file should exist")
-	}
-}
-
-func TestExportItem_ResolveCollision_SameID_Overwrites(t *testing.T) {
+func TestExportItem_SameID_Overwrites(t *testing.T) {
 	exp, _ := newItemTestExporter()
 	item := &model.Item{
 		ID: "same-id", Name: "同名", Type: "NOTE",
@@ -312,7 +310,7 @@ func TestExportItem_ResolveCollision_SameID_Overwrites(t *testing.T) {
 		t.Fatal(err)
 	}
 	if result.Path != "user1/NOTE/工作/同名.json" {
-		t.Errorf("same ID should overwrite without suffix, got: %q", result.Path)
+		t.Errorf("same ID should overwrite, got: %q", result.Path)
 	}
 }
 
@@ -333,6 +331,47 @@ func TestDeleteItem_RemovesLeaf(t *testing.T) {
 	}
 	if fs.Exists("user1/NOTE/工作/要刪除.json") {
 		t.Error("file should be removed after DeleteItem")
+	}
+}
+
+func TestDeleteItem_RenamesSoleSiblingBack(t *testing.T) {
+	id1 := "aaaaaaaaaaaaaaaaaaaaaaaa"
+	id2 := "bbbbbbbbbbbbbbbbbbbbbbbb"
+	mfs := NewMemoryVaultFS()
+	resolver := NewPathResolver([]TreeNode{
+		{ID: "f1", Name: "工作", ItemType: "NOTE_FOLDER", ParentID: nil},
+		{ID: id1, Name: "同名", ItemType: "NOTE", ParentID: strPtr("f1")},
+		{ID: id2, Name: "同名", ItemType: "NOTE", ParentID: strPtr("f1")},
+	})
+	exp := NewExporter(mfs, resolver)
+	fs := mfs
+	a := &model.Item{ID: id1, Name: "同名", Type: "NOTE", Fields: map[string]interface{}{"parentID": "f1"}}
+	b := &model.Item{ID: id2, Name: "同名", Type: "NOTE", Fields: map[string]interface{}{"parentID": "f1"}}
+	if _, err := exp.ExportItem("user1", a); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := exp.ExportItem("user1", b); err != nil {
+		t.Fatal(err)
+	}
+	pathA := "user1/NOTE/工作/同名_" + id1 + ".json"
+	pathB := "user1/NOTE/工作/同名_" + id2 + ".json"
+	if !fs.Exists(pathA) {
+		t.Fatalf("id1 should have _id suffix, files: %v", fs.ListAllFiles())
+	}
+	if !fs.Exists(pathB) {
+		t.Fatal("id2 should have _id suffix")
+	}
+	if err := exp.DeleteItem("user1", id1); err != nil {
+		t.Fatal(err)
+	}
+	if fs.Exists(pathA) {
+		t.Error("id1 should be deleted")
+	}
+	if fs.Exists(pathB) {
+		t.Error("sole remaining sibling should be renamed back (no _id)")
+	}
+	if !fs.Exists("user1/NOTE/工作/同名.json") {
+		t.Errorf("sole remaining sibling should be 同名.json, files: %v", fs.ListAllFiles())
 	}
 }
 
@@ -371,5 +410,87 @@ func TestExportBatch_AllItems(t *testing.T) {
 	}
 	if !fs.Exists("user1/NOTE/工作/note1.json") || !fs.Exists("user1/NOTE/工作/note2.json") {
 		t.Fatal("batch export should create all items")
+	}
+}
+
+func TestExportItem_NonFolderNoParent_GoesToUnsorted(t *testing.T) {
+	fs := NewMemoryVaultFS()
+	resolver := NewPathResolver([]TreeNode{})
+	exp := NewExporter(fs, resolver)
+
+	item := &model.Item{
+		ID:     "orphan1",
+		Name:   "孤兒筆記",
+		Type:   "TODO",
+		Fields: map[string]interface{}{},
+	}
+	result, err := exp.ExportItem("user1", item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Path != "user1/TODO/_unsorted/孤兒筆記.json" {
+		t.Errorf("non-folder without parent should go to {TYPE}/_unsorted, got %q", result.Path)
+	}
+}
+
+func TestExportItem_OrphanParent_GoesToUnsorted(t *testing.T) {
+	fs := NewMemoryVaultFS()
+	resolver := NewPathResolver([]TreeNode{})
+	exp := NewExporter(fs, resolver)
+
+	item := &model.Item{
+		ID:   "orphan2",
+		Name: "斷鏈筆記",
+		Type: "NOTE",
+		Fields: map[string]interface{}{
+			"parentID": "nonexistent-parent",
+		},
+	}
+	result, err := exp.ExportItem("user1", item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Path != "user1/NOTE/_unsorted/斷鏈筆記.json" {
+		t.Errorf("orphan parent should go to {TYPE}/_unsorted, got %q", result.Path)
+	}
+}
+
+// --- 增量匯出時同名衝突自動重命名 sibling ---
+
+func TestExportItem_NewConflict_RenamesSibling(t *testing.T) {
+	mfs := NewMemoryVaultFS()
+	resolver := NewPathResolver([]TreeNode{
+		{ID: "f1", Name: "工作", ItemType: "NOTE_FOLDER", ParentID: nil},
+		{ID: "n1", Name: "inbox", ItemType: "NOTE", ParentID: strPtr("f1")},
+	})
+	exp := NewExporter(mfs, resolver)
+
+	// 先匯出 n1（唯一）→ inbox.json
+	first := &model.Item{ID: "n1", Name: "inbox", Type: "NOTE", Fields: map[string]interface{}{"parentID": "f1"}}
+	r1, err := exp.ExportItem("user1", first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r1.Path != "user1/NOTE/工作/inbox.json" {
+		t.Fatalf("first export should be simple name, got %q", r1.Path)
+	}
+
+	// 新增同名 n2 到 resolver
+	resolver.AddNode(TreeNode{ID: "n2", Name: "inbox", ItemType: "NOTE", ParentID: strPtr("f1")})
+
+	// 匯出 n2 → inbox_n2.json，且 n1 應被重命名為 inbox_n1.json
+	second := &model.Item{ID: "n2", Name: "inbox", Type: "NOTE", Fields: map[string]interface{}{"parentID": "f1"}}
+	r2, err := exp.ExportItem("user1", second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r2.Path != "user1/NOTE/工作/inbox_n2.json" {
+		t.Fatalf("second export should have ID suffix, got %q", r2.Path)
+	}
+	if !mfs.Exists("user1/NOTE/工作/inbox_n1.json") {
+		t.Fatal("sibling n1 should be renamed to inbox_n1.json")
+	}
+	if mfs.Exists("user1/NOTE/工作/inbox.json") {
+		t.Fatal("old inbox.json should no longer exist")
 	}
 }

@@ -42,13 +42,6 @@ func main() {
 	defer pgStore.Close()
 	pgStore.SetRedis(rdb)
 
-	// Ensure chat_messages table exists
-	if err := pgStore.EnsureChatMessagesTable(ctx); err != nil {
-		log.Fatalf("EnsureChatMessagesTable 失敗: %v", err)
-	}
-	if err := pgStore.EnsureSessionMappingConstraint(ctx); err != nil {
-		log.Printf("EnsureSessionMappingConstraint 警告: %v", err)
-	}
 	if err := pgStore.EnsureVaultSnapshotsTable(ctx); err != nil {
 		log.Fatalf("EnsureVaultSnapshotsTable 失敗: %v", err)
 	}
@@ -78,15 +71,27 @@ func main() {
 	worker.SetOwnerScanLimit(cfg.SyncOwnerScanLimit)
 	worker.SetChangeBatchSize(cfg.SyncChangeBatchSize)
 
+	// WorkerClient（僅 Rebuild，用於 VaultSyncHandler 觸發插件編譯）
+	var workerClient *api.WorkerClient
+	workerURL := os.Getenv("CLI_WORKER_URL")
+	workerSecret := os.Getenv("INTERNAL_SECRET")
+	if workerURL != "" {
+		workerClient = api.NewWorkerClient(workerURL, workerSecret)
+		log.Printf("CLI Worker: %s", workerURL)
+	} else {
+		log.Printf("CLI_WORKER_URL 未設定，plugin rebuild 功能停用")
+	}
+
 	// API server
 	mux := http.NewServeMux()
 
-	chatHandler := api.NewChatHandler(pgStore, vaultFS)
-	chatHandler.RegisterRoutes(mux)
-
-	wsHandler := api.NewWsHandler(pgStore, pgStore, pgStore, cfg.VaultRoot, vaultFS, cfg)
-	wsHandler.RegisterRoutes(mux)
-	chatHandler.SetWsHandler(wsHandler)
+	var svcHandler *api.ServiceHandler
+	serviceWorkerURL := os.Getenv("SERVICE_WORKER_URL")
+	if serviceWorkerURL != "" {
+		svcHandler = api.NewServiceHandler(cfg.VaultRoot, serviceWorkerURL, workerSecret)
+		svcHandler.RegisterRoutes(mux)
+		log.Printf("Service Worker: %s", serviceWorkerURL)
+	}
 
 	schemaHandler := api.NewSchemaHandler(vaultFS)
 	schemaHandler.RegisterRoutes(mux)
@@ -94,10 +99,13 @@ func main() {
 	skillHandler := api.NewSkillHandler(vaultFS)
 	skillHandler.RegisterRoutes(mux)
 
-	pluginHandler := api.NewPluginHandler(vaultFS, pgStore, vaultLock, projector)
+	gitHandler := api.NewPluginGitHandler(cfg.VaultRoot, vaultLock, workerClient)
+	gitHandler.RegisterRoutes(mux)
+
+	pluginHandler := api.NewPluginHandler(vaultFS, pgStore, vaultLock, projector, svcHandler, gitHandler)
 	pluginHandler.RegisterRoutes(mux)
 
-	vaultSyncHandler := api.NewVaultSyncHandler(vaultFS, cfg.VaultRoot, wsHandler)
+	vaultSyncHandler := api.NewVaultSyncHandler(vaultFS, cfg.VaultRoot, nil, workerClient)
 	vaultSyncHandler.RegisterRoutes(mux)
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
@@ -132,7 +140,6 @@ func main() {
 		return nil
 	})
 
-	// 收到中斷信號時觸發 shutdown
 	g.Go(func() error {
 		quit := make(chan os.Signal, 1)
 		signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
@@ -178,3 +185,5 @@ func getHostname() string {
 	}
 	return h
 }
+
+

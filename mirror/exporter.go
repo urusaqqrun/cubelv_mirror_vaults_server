@@ -5,12 +5,15 @@ import (
 	"fmt"
 	"io/fs"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 
 	"github.com/urusaqqrun/vault-mirror-service/model"
 	"golang.org/x/sync/errgroup"
 )
+
+var hexIDRe = regexp.MustCompile(`^[0-9a-f]{24}$`)
 
 // Exporter 負責資料庫資料 → Vault 檔案的匯出
 type Exporter struct {
@@ -34,7 +37,8 @@ type ExportItemResult struct {
 	IsFolder bool
 }
 
-// ExportItem 通用匯出：每個 item 都對應一個 name.json。
+// ExportItem 通用匯出：每個 item 都對應一個 .json 檔。
+// 檔名規則：同層級無同名 → {sanitizeName(name)}.json；有同名 → {sanitizeName(name)}_{id}.json
 func (e *Exporter) ExportItem(userId string, item *model.Item) (ExportItemResult, error) {
 	mirrorData := ItemToMirrorData(item)
 	parentDirPath := e.ResolveParentDir(userId, item.GetParentID(), item.Type)
@@ -42,13 +46,15 @@ func (e *Exporter) ExportItem(userId string, item *model.Item) (ExportItemResult
 		return ExportItemResult{}, fmt.Errorf("mkdir parent: %w", err)
 	}
 
-	fileName := sanitizeName(mirrorData.Name) + ".json"
+	needsID := e.resolver.NeedsIDSuffix(mirrorData.ID)
+	fileName := BuildFileName(mirrorData.Name, mirrorData.ID, needsID)
 	fullPath := filepath.Join(parentDirPath, fileName)
 
-	// 檔名衝突處理：同路徑已存在且 ID 不同 → 加 ID 後綴。
-	fullPath = e.resolveCollision(fullPath, mirrorData.ID)
-
 	e.cleanupOldItemPath(userId, mirrorData.ID, fullPath)
+
+	if needsID {
+		e.ensureSiblingsHaveIDSuffix(userId, mirrorData.ID, parentDirPath)
+	}
 
 	jsonBytes, err := ItemToMirrorJSON(mirrorData)
 	if err != nil {
@@ -66,15 +72,59 @@ func (e *Exporter) ExportItem(userId string, item *model.Item) (ExportItemResult
 	}, nil
 }
 
+// ensureSiblingsHaveIDSuffix 確保同名 sibling 的檔案也帶有 _id 後綴。
+// 場景：新增 item 造成同名衝突時，已存在的 sibling 原本是 name.json，需改名為 name_id.json。
+func (e *Exporter) ensureSiblingsHaveIDSuffix(userID, itemID, parentDirPath string) {
+	siblings := e.resolver.GetConflictingSiblings(itemID)
+	for _, sibID := range siblings {
+		e.ensureDocPathIndex(userID)
+		oldPath := e.getIndexedPath(userID, sibID)
+		if oldPath == "" {
+			continue
+		}
+		data, err := e.fs.ReadFile(oldPath)
+		if err != nil {
+			continue
+		}
+		sibItem, err := MirrorJSONToItem(data)
+		if err != nil {
+			continue
+		}
+		expectedName := BuildFileName(sibItem.Name, sibItem.ID, true)
+		expectedPath := filepath.Join(parentDirPath, expectedName)
+		if oldPath == expectedPath {
+			continue
+		}
+		if !e.fs.Exists(oldPath) {
+			continue
+		}
+		if err := e.fs.Rename(oldPath, expectedPath); err != nil {
+			continue
+		}
+		e.setIndexedPath(userID, sibID, expectedPath)
+		oldDir := strings.TrimSuffix(oldPath, ".json")
+		newDir := strings.TrimSuffix(expectedPath, ".json")
+		if oldDir != oldPath && e.fs.Exists(oldDir) {
+			_ = e.fs.Rename(oldDir, newDir)
+		}
+	}
+}
+
 // ResolveParentDir returns the directory path where an item's .json should be written.
+// FOLDER + 無 parent → {TYPE}/；非 FOLDER + 無 parent → {TYPE}/_unsorted/
+// 孤兒 / circular ref → {TYPE}/_unsorted/
 func (e *Exporter) ResolveParentDir(userID, parentID, itemType string) string {
+	typeFallback := filepath.Join(userID, resolveTypeFromItemType(itemType), "_unsorted")
 	if parentID == "" {
-		return filepath.Join(userID, resolveTypeFromItemType(itemType))
+		if model.IsFolder(itemType) {
+			return filepath.Join(userID, resolveTypeFromItemType(itemType))
+		}
+		return typeFallback
 	}
 
 	resolvedPath, err := e.resolver.ResolvePath(parentID)
 	if err != nil || resolvedPath == "" {
-		return filepath.Join(userID, "_unsorted")
+		return typeFallback
 	}
 	return e.resolveIndexedParentDir(userID, parentID, filepath.Join(userID, resolvedPath))
 }
@@ -88,52 +138,6 @@ func (e *Exporter) resolveIndexedParentDir(userID, parentID, fallbackPath string
 		return strings.TrimSuffix(indexed, ".json")
 	}
 	return fallbackPath
-}
-
-// resolveCollision 若目標路徑已被不同 ID 佔用，加 _{id後8碼} 後綴。
-// 支援迴圈檢查：若後綴路徑也被佔用，改用完整 ID 作為後綴。
-func (e *Exporter) resolveCollision(targetPath, itemID string) string {
-	if !e.fs.Exists(targetPath) {
-		return targetPath
-	}
-	existing, err := e.fs.ReadFile(targetPath)
-	if err != nil {
-		return targetPath
-	}
-	parsed, err := MirrorJSONToItem(existing)
-	if err != nil || parsed.ID == itemID {
-		return targetPath
-	}
-
-	ext := filepath.Ext(targetPath)
-	base := strings.TrimSuffix(targetPath, ext)
-
-	// 先嘗試短後綴（ID 後 8 碼）
-	suffix := itemID
-	if len(suffix) > 8 {
-		suffix = suffix[len(suffix)-8:]
-	}
-	candidate := base + "_" + suffix + ext
-	if !e.fs.Exists(candidate) {
-		return candidate
-	}
-	if data, err := e.fs.ReadFile(candidate); err == nil {
-		if p, err := MirrorJSONToItem(data); err == nil && p.ID == itemID {
-			return candidate
-		}
-	}
-
-	// 短後綴也被佔用 → 使用完整 ID
-	candidate = base + "_" + itemID + ext
-	return candidate
-}
-
-func collisionSuffix(itemID string) string {
-	suffix := itemID
-	if len(suffix) > 8 {
-		suffix = suffix[len(suffix)-8:]
-	}
-	return suffix
 }
 
 // cleanupOldItemPath 清理同 ID 但舊位置的投影（改名/搬移情境）。
@@ -160,6 +164,7 @@ func (e *Exporter) cleanupOldItemPath(userID, docID, newPath string) {
 }
 
 // DeleteItem 通用刪除：刪除 item 的 .json 與同名子目錄。
+// 刪除後若同目錄下同名檔案從多個變成一個，自動 rename 回不帶 _id 的名稱。
 func (e *Exporter) DeleteItem(userId, itemID string) error {
 	e.ensureDocPathIndex(userId)
 	oldPath := e.getIndexedPath(userId, itemID)
@@ -167,7 +172,15 @@ func (e *Exporter) DeleteItem(userId, itemID string) error {
 		return nil
 	}
 
+	// 刪除前取得 item name（用於後續 sibling rename 判斷）
+	var itemName string
 	if e.fs.Exists(oldPath) {
+		if data, readErr := e.fs.ReadFile(oldPath); readErr == nil {
+			var obj map[string]interface{}
+			if json.Unmarshal(data, &obj) == nil {
+				itemName, _ = obj["name"].(string)
+			}
+		}
 		if err := e.fs.Remove(oldPath); err != nil {
 			return err
 		}
@@ -179,7 +192,57 @@ func (e *Exporter) DeleteItem(userId, itemID string) error {
 		}
 	}
 	e.removeIndexedPath(userId, itemID)
+	e.resolver.RemoveNode(itemID)
+
+	if itemName != "" {
+		e.renameSoleSiblingAfterDelete(userId, filepath.Dir(oldPath), itemName)
+	}
+
 	return nil
+}
+
+// renameSoleSiblingAfterDelete 在刪除後，若同目錄只剩一個同名帶 _id 的檔案，rename 回不帶 _id。
+func (e *Exporter) renameSoleSiblingAfterDelete(userID, parentDir, itemName string) {
+	sanitized := sanitizeName(itemName)
+	prefix := sanitized + "_"
+
+	var matches []string
+	_ = e.fs.Walk(parentDir, func(path string, info fs.FileInfo, err error) error {
+		if err != nil || info == nil || filepath.Dir(path) != parentDir {
+			return nil
+		}
+		if !strings.HasSuffix(path, ".json") {
+			return nil
+		}
+		base := strings.TrimSuffix(filepath.Base(path), ".json")
+		if strings.HasPrefix(base, prefix) {
+			suffix := base[len(prefix):]
+			if hexIDRe.MatchString(suffix) {
+				matches = append(matches, path)
+			}
+		}
+		return nil
+	})
+
+	if len(matches) != 1 {
+		return
+	}
+	oldPath := matches[0]
+	newPath := filepath.Join(parentDir, sanitized+".json")
+	if oldPath == newPath || e.fs.Exists(newPath) {
+		return
+	}
+	if err := e.fs.Rename(oldPath, newPath); err != nil {
+		return
+	}
+	oldDir := strings.TrimSuffix(oldPath, ".json")
+	newDir := strings.TrimSuffix(newPath, ".json")
+	if oldDir != oldPath && e.fs.Exists(oldDir) {
+		_ = e.fs.Rename(oldDir, newDir)
+	}
+	oldBase := strings.TrimSuffix(filepath.Base(oldPath), ".json")
+	sibID := oldBase[len(prefix):]
+	e.setIndexedPath(userID, sibID, newPath)
 }
 
 // ExportBatch 使用 errgroup 並行寫入多個檔案到 EFS（上限 8 goroutines）
