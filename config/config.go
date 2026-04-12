@@ -14,6 +14,12 @@ type Config struct {
 	SyncCursorLeaseSec  int
 	SyncOwnerScanLimit  int
 	SyncChangeBatchSize int
+
+	// CLI 資源控制
+	CLIIdleTTLSec    int // main CLI idle timeout（秒），預設 300（5 分鐘）
+	MaxWarmPool      int // 全域 warmup pool 上限，預設 5
+	MaxGlobalCLI     int // 全域活躍 main CLI 上限（跨 user），預設 10
+	MaxCLIPerUser    int // 單一 user 活躍 CLI 上限，預設 3
 }
 
 func Load() *Config {
@@ -27,6 +33,10 @@ func Load() *Config {
 		SyncCursorLeaseSec:  getEnvInt("SYNC_CURSOR_LEASE_SEC", 120),
 		SyncOwnerScanLimit:  getEnvInt("SYNC_OWNER_SCAN_LIMIT", 128),
 		SyncChangeBatchSize: getEnvInt("SYNC_CHANGE_BATCH_SIZE", 100),
+		CLIIdleTTLSec:       getEnvInt("CLI_IDLE_TTL_SEC", 300),
+		MaxWarmPool:          getEnvInt("MAX_WARM_POOL", 5),
+		MaxGlobalCLI:         getEnvInt("MAX_GLOBAL_CLI", 10),
+		MaxCLIPerUser:        getEnvInt("MAX_CLI_PER_USER", 3),
 	}
 }
 

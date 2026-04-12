@@ -738,6 +738,11 @@ func (s *StreamCLI) Pid() int {
 	return 0
 }
 
+// WaitExit blocks until the CLI process exits (by any cause: idle timeout, kill, crash).
+func (s *StreamCLI) WaitExit() {
+	<-s.doneCh
+}
+
 func (s *StreamCLI) SessionID() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -14,13 +14,16 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/gorilla/websocket"
+	"github.com/urusaqqrun/vault-mirror-service/config"
 	"github.com/urusaqqrun/vault-mirror-service/database"
 	"github.com/urusaqqrun/vault-mirror-service/executor"
 	"github.com/urusaqqrun/vault-mirror-service/mirror"
@@ -90,16 +93,26 @@ type WsHandler struct {
 	sessions      sync.Map // sessionKey -> *WsSession
 	cliPool       sync.Map // memberID -> *warmCLI (warmup pool)
 	snapCache     sync.Map // memberID -> *cachedSnapshot
+
+	cliIdleTTL   time.Duration
+	maxWarmPool  int
+	maxGlobalCLI int
+	maxCLIPerUser int
+	activeCLIs   int64 // atomic: 全域活躍 CLI 數
 }
 
 // NewWsHandler creates a new WsHandler.
-func NewWsHandler(chatStore ChatStore, snapshotStore SnapshotStore, itemWriter executor.DataWriter, vaultRoot string, vaultFS mirror.VaultFS) *WsHandler {
+func NewWsHandler(chatStore ChatStore, snapshotStore SnapshotStore, itemWriter executor.DataWriter, vaultRoot string, vaultFS mirror.VaultFS, cfg *config.Config) *WsHandler {
 	return &WsHandler{
 		chatStore:     chatStore,
 		snapshotStore: snapshotStore,
 		itemWriter:    itemWriter,
 		vaultRoot:     vaultRoot,
 		vaultFS:       vaultFS,
+		cliIdleTTL:    time.Duration(cfg.CLIIdleTTLSec) * time.Second,
+		maxWarmPool:   cfg.MaxWarmPool,
+		maxGlobalCLI:  cfg.MaxGlobalCLI,
+		maxCLIPerUser: cfg.MaxCLIPerUser,
 	}
 }
 
@@ -119,6 +132,91 @@ func (h *WsHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/ws/chat", h.HandleWebSocket)
 	mux.HandleFunc("POST /cli_warmup", h.HandleWarmup)
 	mux.HandleFunc("POST /api/internal/forge", h.HandleForgeAPI)
+	mux.HandleFunc("GET /debug/cli_metrics", h.HandleCLIMetrics)
+}
+
+// ActiveCLIs returns the current global active CLI count (for external read).
+func (h *WsHandler) ActiveCLIs() int64 {
+	return atomic.LoadInt64(&h.activeCLIs)
+}
+
+// TrackCLI increments the global active CLI counter.
+func (h *WsHandler) TrackCLI() {
+	atomic.AddInt64(&h.activeCLIs, 1)
+}
+
+// UntrackCLI decrements the global active CLI counter.
+func (h *WsHandler) UntrackCLI() {
+	atomic.AddInt64(&h.activeCLIs, -1)
+}
+
+// trackNewCLI registers a newly created CLI in the global counter and sets up
+// automatic cleanup when the CLI process exits.
+func (h *WsHandler) trackNewCLI(cli *executor.StreamCLI) {
+	h.TrackCLI()
+	go func() {
+		cli.WaitExit()
+		h.UntrackCLI()
+	}()
+}
+
+// countWarmPool counts alive CLIs in the warm pool.
+func (h *WsHandler) countWarmPool() int {
+	count := 0
+	h.cliPool.Range(func(_, val any) bool {
+		wc := val.(*warmCLI)
+		if wc.cli.IsAlive() {
+			count++
+		}
+		return true
+	})
+	return count
+}
+
+// HandleCLIMetrics returns runtime metrics for monitoring and tuning.
+func (h *WsHandler) HandleCLIMetrics(w http.ResponseWriter, r *http.Request) {
+	var activeSessions, aliveCLIs int
+	h.sessions.Range(func(_, val any) bool {
+		activeSessions++
+		s := val.(*WsSession)
+		s.mu.Lock()
+		if s.cli != nil && s.cli.IsAlive() {
+			aliveCLIs++
+		}
+		s.mu.Unlock()
+		return true
+	})
+
+	var warmPoolSize int
+	h.cliPool.Range(func(_, val any) bool {
+		wc := val.(*warmCLI)
+		if wc.cli.IsAlive() {
+			warmPoolSize++
+		}
+		return true
+	})
+
+	var memStats runtime.MemStats
+	runtime.ReadMemStats(&memStats)
+
+	resp := map[string]interface{}{
+		"active_sessions":  activeSessions,
+		"alive_clis":       aliveCLIs,
+		"warm_pool_size":   warmPoolSize,
+		"global_cli_count": atomic.LoadInt64(&h.activeCLIs),
+		"rss_mb":           memStats.Sys / 1024 / 1024,
+		"heap_alloc_mb":    memStats.HeapAlloc / 1024 / 1024,
+		"heap_in_use_mb":   memStats.HeapInuse / 1024 / 1024,
+		"goroutines":       runtime.NumGoroutine(),
+		"config": map[string]interface{}{
+			"cli_idle_ttl_sec":  int(h.cliIdleTTL.Seconds()),
+			"max_warm_pool":     h.maxWarmPool,
+			"max_global_cli":    h.maxGlobalCLI,
+			"max_cli_per_user":  h.maxCLIPerUser,
+		},
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
 }
 
 // HandleForgeAPI 接收來自 MCP plugin-forge 的插件鍛造請求
@@ -204,17 +302,39 @@ func (h *WsHandler) HandleWarmup(w http.ResponseWriter, r *http.Request) {
 		h.cliPool.Delete(memberID)
 	}
 
+	// 檢查 warm pool 是否已滿
+	poolCount := h.countWarmPool()
+	if poolCount >= h.maxWarmPool {
+		log.Printf("[Warmup] warm pool full (%d/%d), rejecting warmup for %s",
+			poolCount, h.maxWarmPool, memberID)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(200)
+		json.NewEncoder(w).Encode(map[string]string{"status": "pool_full"})
+		return
+	}
+
+	// 檢查全域 CLI 上限
+	if atomic.LoadInt64(&h.activeCLIs) >= int64(h.maxGlobalCLI) {
+		log.Printf("[Warmup] global CLI limit reached (%d/%d), rejecting warmup for %s",
+			atomic.LoadInt64(&h.activeCLIs), h.maxGlobalCLI, memberID)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(200)
+		json.NewEncoder(w).Encode(map[string]string{"status": "global_limit"})
+		return
+	}
+
 	go func() {
 		warmupStart := time.Now()
 		workDir := filepath.Join(h.vaultRoot, memberID)
-		cli, err := executor.NewStreamCLI(workDir, "chat", memberID, "", model, false, 5*time.Minute)
+		cli, err := executor.NewStreamCLI(workDir, "chat", memberID, "", model, false, h.cliIdleTTL)
 		if err != nil {
 			log.Printf("[Warmup] CLI start failed for %s: %v", memberID, err)
 			return
 		}
+		h.trackNewCLI(cli)
 		h.cliPool.Store(memberID, &warmCLI{cli: cli, model: model})
-		log.Printf("[CacheProfile] Warmup DONE — %dms, member=%s, model=%s, pid=%d",
-			time.Since(warmupStart).Milliseconds(), memberID, model, cli.Pid())
+		log.Printf("[CacheProfile] Warmup DONE — %dms, member=%s, model=%s, pid=%d, global_clis=%d",
+			time.Since(warmupStart).Milliseconds(), memberID, model, cli.Pid(), atomic.LoadInt64(&h.activeCLIs))
 	}()
 
 	w.Header().Set("Content-Type", "application/json")
@@ -325,7 +445,7 @@ func (h *WsHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		workDir := filepath.Join(h.vaultRoot, memberID)
 
 		// 限制同一 user 最多 3 個活躍 CLI，超過時 kill 最舊的
-		h.enforceMaxCLIs(memberID, 3)
+		h.enforceMaxCLIs(memberID, h.maxCLIPerUser)
 
 		if isNew {
 			if val, loaded := h.cliPool.LoadAndDelete(memberID); loaded {
@@ -347,11 +467,12 @@ func (h *WsHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 			if sessionID != "" {
 				executor.CleanupSessionJSONL(sessionID, workDir)
 			}
-			cli, err := executor.NewStreamCLI(workDir, "chat", memberID, sessionID, model, false, 5*time.Minute)
+			cli, err := executor.NewStreamCLI(workDir, "chat", memberID, sessionID, model, false, h.cliIdleTTL)
 			if err != nil {
 				log.Printf("[WS] CLI start failed for %s: %v", memberID, err)
 				return
 			}
+			h.trackNewCLI(cli)
 			session.mu.Lock()
 			session.cli = cli
 			session.mu.Unlock()
@@ -398,11 +519,12 @@ func (h *WsHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 						time.Since(rebuildStart).Milliseconds(), len(smList))
 				}
 
-				cli, err := executor.NewStreamCLI(workDir, "chat", memberID, sessionID, model, true, 5*time.Minute)
+				cli, err := executor.NewStreamCLI(workDir, "chat", memberID, sessionID, model, true, h.cliIdleTTL)
 				if err != nil {
 					log.Printf("[WS] CLI resume start failed for %s: %v", memberID, err)
 					return
 				}
+				h.trackNewCLI(cli)
 				session.mu.Lock()
 				session.cli = cli
 				session.mu.Unlock()
@@ -416,11 +538,12 @@ func (h *WsHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		if sessionID != "" {
 			executor.CleanupSessionJSONL(sessionID, workDir)
 		}
-		cli, err := executor.NewStreamCLI(workDir, "chat", memberID, sessionID, model, false, 5*time.Minute)
+		cli, err := executor.NewStreamCLI(workDir, "chat", memberID, sessionID, model, false, h.cliIdleTTL)
 		if err != nil {
 			log.Printf("[WS] CLI start failed for %s: %v", memberID, err)
 			return
 		}
+		h.trackNewCLI(cli)
 		session.mu.Lock()
 		session.cli = cli
 		session.mu.Unlock()
@@ -942,7 +1065,7 @@ sendAndProcess:
 			executor.CleanupSessionJSONL(session.sessionID, workDir)
 		}
 
-		newCLI, newErr := executor.NewStreamCLI(workDir, "chat", session.memberID, session.sessionID, session.model, false, 5*time.Minute)
+		newCLI, newErr := executor.NewStreamCLI(workDir, "chat", session.memberID, session.sessionID, session.model, false, h.cliIdleTTL)
 		if newErr != nil {
 			log.Printf("[WS-CLI] fallback CLI start failed: %v", newErr)
 			session.Send(map[string]interface{}{
@@ -951,6 +1074,7 @@ sendAndProcess:
 				"error":    fmt.Sprintf("fallback CLI error: %v", newErr),
 			})
 		} else {
+			h.trackNewCLI(newCLI)
 			session.mu.Lock()
 			session.cli = newCLI
 			session.mu.Unlock()
@@ -1274,11 +1398,12 @@ func (h *WsHandler) ensureCLI(session *WsSession) *executor.StreamCLI {
 	log.Printf("[CacheProfile] rebuildSessionJSONL DONE — %dms", time.Since(rebuildStart).Milliseconds())
 
 	cliStart := time.Now()
-	newCLI, err := executor.NewStreamCLI(workDir, "chat", session.memberID, session.sessionID, session.model, true, 5*time.Minute)
+	newCLI, err := executor.NewStreamCLI(workDir, "chat", session.memberID, session.sessionID, session.model, true, h.cliIdleTTL)
 	if err != nil {
 		log.Printf("[CacheProfile] NewStreamCLI FAILED — %dms, error=%v", time.Since(cliStart).Milliseconds(), err)
 		return nil
 	}
+	h.trackNewCLI(newCLI)
 	log.Printf("[CacheProfile] NewStreamCLI DONE — %dms, pid=%d", time.Since(cliStart).Milliseconds(), newCLI.Pid())
 
 	session.mu.Lock()
