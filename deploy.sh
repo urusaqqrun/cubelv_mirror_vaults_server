@@ -84,10 +84,6 @@ else
   echo "✅ ECR 存儲庫 $ECR_REPOSITORY 已存在"
 fi
 
-# 登錄到 ECR
-aws ecr get-login-password --region "$AWS_REGION" \
-| docker login --username AWS --password-stdin "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-
 # ----------------------------------------
 # 建立 ECS Cluster（若不存在）
 # ----------------------------------------
