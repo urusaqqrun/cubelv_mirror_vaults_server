@@ -142,22 +142,24 @@ docker buildx build \
 # 更新 Task Definition
 # ----------------------------------------
 echo "=== 更新 ECS Task Definition ==="
-cp mirror-service-task-definition.json mirror-service-task-definition-updated.json
+WORK_TD="$(mktemp)"
+trap 'rm -f "$WORK_TD"' EXIT
+cp mirror-service-task-definition.json "$WORK_TD"
 
 if [[ "$OSTYPE" == "darwin"* ]]; then
-  sed -i '' "s/<AWS_ACCOUNT_ID>/$AWS_ACCOUNT_ID/g" mirror-service-task-definition-updated.json
-  sed -i '' "s/<REGION>/$AWS_REGION/g" mirror-service-task-definition-updated.json
-  sed -i '' "s/<EFS_FILE_SYSTEM_ID>/$EFS_FILE_SYSTEM_ID/g" mirror-service-task-definition-updated.json
-  sed -i '' "s/<EFS_ACCESS_POINT_ID>/$EFS_ACCESS_POINT_ID/g" mirror-service-task-definition-updated.json
+  sed -i '' "s/<AWS_ACCOUNT_ID>/$AWS_ACCOUNT_ID/g" "$WORK_TD"
+  sed -i '' "s/<REGION>/$AWS_REGION/g" "$WORK_TD"
+  sed -i '' "s/<EFS_FILE_SYSTEM_ID>/$EFS_FILE_SYSTEM_ID/g" "$WORK_TD"
+  sed -i '' "s/<EFS_ACCESS_POINT_ID>/$EFS_ACCESS_POINT_ID/g" "$WORK_TD"
 else
-  sed -i "s/<AWS_ACCOUNT_ID>/$AWS_ACCOUNT_ID/g" mirror-service-task-definition-updated.json
-  sed -i "s/<REGION>/$AWS_REGION/g" mirror-service-task-definition-updated.json
-  sed -i "s/<EFS_FILE_SYSTEM_ID>/$EFS_FILE_SYSTEM_ID/g" mirror-service-task-definition-updated.json
-  sed -i "s/<EFS_ACCESS_POINT_ID>/$EFS_ACCESS_POINT_ID/g" mirror-service-task-definition-updated.json
+  sed -i "s/<AWS_ACCOUNT_ID>/$AWS_ACCOUNT_ID/g" "$WORK_TD"
+  sed -i "s/<REGION>/$AWS_REGION/g" "$WORK_TD"
+  sed -i "s/<EFS_FILE_SYSTEM_ID>/$EFS_FILE_SYSTEM_ID/g" "$WORK_TD"
+  sed -i "s/<EFS_ACCESS_POINT_ID>/$EFS_ACCESS_POINT_ID/g" "$WORK_TD"
 fi
 
 TASK_DEFINITION_ARN=$(aws ecs register-task-definition \
-  --cli-input-json file://mirror-service-task-definition-updated.json \
+  --cli-input-json file://"$WORK_TD" \
   --region "$AWS_REGION" \
   --query 'taskDefinition.taskDefinitionArn' \
   --output text)
@@ -224,7 +226,7 @@ else
 fi
 
 # 清理
-rm -f mirror-service-task-definition-updated.json plugins-src.tar.gz
+rm -f "$WORK_TD" plugins-src.tar.gz
 
 # ----------------------------------------
 # 等待部署穩定 + 刷新 Router DNS 快取
