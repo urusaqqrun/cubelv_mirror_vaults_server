@@ -7,10 +7,10 @@ import (
 
 // Item 統一資料類型（對應 go-service 的 Item collection）
 type Item struct {
-	ID     string                 `json:"id" bson:"_id,omitempty"`
-	Name   string                 `json:"name" bson:"name"`
-	Type   string                 `json:"itemType" bson:"itemType"`
-	Fields map[string]interface{} `json:"fields" bson:"fields"`
+	ID     string                 `json:"id"`
+	Name   string                 `json:"name"`
+	Type   string                 `json:"itemType"`
+	Fields map[string]interface{} `json:"fields"`
 }
 
 // IsFolder 判斷 itemType 是否為資料夾類型（相容舊的 "FOLDER" + 通用 _FOLDER 後綴）

@@ -2,21 +2,21 @@ package model
 
 // Note 筆記 / 待辦
 type Note struct {
-	ID       string   `bson:"_id,omitempty"`
-	Title    *string  `bson:"title"`
-	Content   *string  `bson:"content"`
-	Tags      []string `bson:"tags"`
-	ParentID  string   `bson:"parentID"`
-	Type      string   `bson:"_type,omitempty"`
-	CreateAt  int64    `bson:"createAt"`
-	UpdateAt  int64    `bson:"updateAt"`
-	OrderAt   *string  `bson:"orderAt,omitempty"`
-	Version   int      `bson:"usn"`
-	Status    *string  `bson:"status,omitempty"`
-	AiTitle   *string  `bson:"aiTitle,omitempty"`
-	AiTags    []string `bson:"aiTags,omitempty"`
-	ImgURLs   []string `bson:"imgURLs"`
-	IsNew     bool     `bson:"isNew"`
+	ID       string   `json:"_id,omitempty"`
+	Title    *string  `json:"title"`
+	Content   *string  `json:"content"`
+	Tags      []string `json:"tags"`
+	ParentID  string   `json:"parentID"`
+	Type      string   `json:"_type,omitempty"`
+	CreateAt  int64    `json:"createAt"`
+	UpdateAt  int64    `json:"updateAt"`
+	OrderAt   *string  `json:"orderAt,omitempty"`
+	Version   int      `json:"usn"`
+	Status    *string  `json:"status,omitempty"`
+	AiTitle   *string  `json:"aiTitle,omitempty"`
+	AiTags    []string `json:"aiTags,omitempty"`
+	ImgURLs   []string `json:"imgURLs"`
+	IsNew     bool     `json:"isNew"`
 }
 
 // GetTitle 回傳筆記標題，nil 時回傳 "Untitled"

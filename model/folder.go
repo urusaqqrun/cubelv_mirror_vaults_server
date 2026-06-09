@@ -2,63 +2,63 @@ package model
 
 // Folder 統一容器（NOTE / TODO / CARD / CHART）
 type Folder struct {
-	ID         string  `bson:"_id"`
-	FolderName string  `bson:"folderName"`
-	Type       *string `bson:"type,omitempty"`
-	ParentID   *string `json:"parentID,omitempty" bson:"parentID,omitempty"`
-	OrderAt    *string `bson:"orderAt,omitempty"`
-	Icon       *string `bson:"icon,omitempty"`
-	CreatedAt  string  `bson:"createdAt"`
-	UpdatedAt  string  `bson:"updatedAt"`
-	Version    int     `bson:"usn"`
-	NoteNum    int64   `bson:"noteNum"`
-	IsTemp     bool    `bson:"isTemp"`
+	ID         string  `json:"_id"`
+	FolderName string  `json:"folderName"`
+	Type       *string `json:"type,omitempty"`
+	ParentID   *string `json:"parentID,omitempty"`
+	OrderAt    *string `json:"orderAt,omitempty"`
+	Icon       *string `json:"icon,omitempty"`
+	CreatedAt  string  `json:"createdAt"`
+	UpdatedAt  string  `json:"updatedAt"`
+	Version    int     `json:"usn"`
+	NoteNum    int64   `json:"noteNum"`
+	IsTemp     bool    `json:"isTemp"`
 
 	// NOTE/TODO 專用
-	Indexes           []*Index  `bson:"indexes,omitempty"`
-	FolderSummary     *string   `bson:"folderSummary,omitempty"`
-	AiFolderName      *string   `bson:"aiFolderName,omitempty"`
-	AiFolderSummary   *string   `bson:"aiFolderSummary,omitempty"`
-	AiInstruction     *string   `bson:"aiInstruction,omitempty"`
-	AutoUpdateSummary bool      `bson:"autoUpdateSummary,omitempty"`
-	IsSummarizedNoteIds []*string `bson:"isSummarizedNoteIds,omitempty"`
+	Indexes           []*Index  `json:"indexes,omitempty"`
+	FolderSummary     *string   `json:"folderSummary,omitempty"`
+	AiFolderName      *string   `json:"aiFolderName,omitempty"`
+	AiFolderSummary   *string   `json:"aiFolderSummary,omitempty"`
+	AiInstruction     *string   `json:"aiInstruction,omitempty"`
+	AutoUpdateSummary bool      `json:"autoUpdateSummary,omitempty"`
+	IsSummarizedNoteIds []*string `json:"isSummarizedNoteIds,omitempty"`
 
 	// CARD 專用
-	Fields          []*CardFieldDef         `json:"fields,omitempty" bson:"fields,omitempty"`
-	TemplateHTML    *string                 `json:"templateHtml,omitempty" bson:"templateHtml,omitempty"`
-	TemplateCSS     *string                 `json:"templateCss,omitempty" bson:"templateCss,omitempty"`
-	UIPrompt        *string                 `json:"uiPrompt,omitempty" bson:"uiPrompt,omitempty"`
-	TemplateHistory []*TemplateHistoryEntry  `json:"templateHistory,omitempty" bson:"templateHistory,omitempty"`
-	IsShared        bool                    `json:"isShared" bson:"isShared"`
-	Searchable      bool                    `json:"searchable" bson:"searchable"`
-	AllowContribute bool                    `json:"allowContribute" bson:"allowContribute"`
-	Sharers         []*Sharer               `json:"sharers,omitempty" bson:"sharers,omitempty"`
+	Fields          []*CardFieldDef         `json:"fields,omitempty"`
+	TemplateHTML    *string                 `json:"templateHtml,omitempty"`
+	TemplateCSS     *string                 `json:"templateCss,omitempty"`
+	UIPrompt        *string                 `json:"uiPrompt,omitempty"`
+	TemplateHistory []*TemplateHistoryEntry  `json:"templateHistory,omitempty"`
+	IsShared        bool                    `json:"isShared"`
+	Searchable      bool                    `json:"searchable"`
+	AllowContribute bool                    `json:"allowContribute"`
+	Sharers         []*Sharer               `json:"sharers,omitempty"`
 
 	// CHART 專用
-	ChartKind *string `json:"chartKind,omitempty" bson:"chartKind,omitempty"`
+	ChartKind *string `json:"chartKind,omitempty"`
 }
 
 type Index struct {
-	Name       string   `bson:"name"`
-	Notes      []string `bson:"notes"`
-	IsReserved bool     `bson:"isReserved"`
+	Name       string   `json:"name"`
+	Notes      []string `json:"notes"`
+	IsReserved bool     `json:"isReserved"`
 }
 
 type CardFieldDef struct {
-	Name    string   `json:"name" bson:"name"`
-	Type    string   `json:"type" bson:"type"`
-	Options []string `json:"options,omitempty" bson:"options,omitempty"`
+	Name    string   `json:"name"`
+	Type    string   `json:"type"`
+	Options []string `json:"options,omitempty"`
 }
 
 type TemplateHistoryEntry struct {
-	HTML      string `json:"html" bson:"html"`
-	CSS       string `json:"css" bson:"css"`
-	Timestamp string `json:"timestamp" bson:"timestamp"`
+	HTML      string `json:"html"`
+	CSS       string `json:"css"`
+	Timestamp string `json:"timestamp"`
 }
 
 type Sharer struct {
-	UserID string `json:"userId" bson:"userId"`
-	Role   string `json:"role" bson:"role"`
+	UserID string `json:"userId"`
+	Role   string `json:"role"`
 }
 
 // GetType 回傳 Folder type，nil 時回傳空字串
